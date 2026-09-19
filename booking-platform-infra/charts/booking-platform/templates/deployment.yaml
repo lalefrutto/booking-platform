@@ -1,0 +1,129 @@
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- $d := $root.Values.defaults }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/part-of: booking-platform
+    app: {{ $name }}
+spec:
+  # Число реплик отдано HPA/KEDA: если задать его здесь, каждая синхронизация
+  # ArgoCD откатывала бы автоскейлер обратно к значению из values.
+  {{- if not (or (and $svc.keda $svc.keda.enabled $root.Values.keda.enabled) $d.hpa.enabled) }}
+  replicas: {{ $d.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/part-of: booking-platform
+        app: {{ $name }}
+        # Метка version нужна Istio для subset'ов в DestinationRule.
+        version: v1
+      annotations:
+        # Перекатывает поды при изменении values (например, нового тега образа).
+        checksum/values: {{ toYaml $svc | sha256sum | trunc 16 }}
+        # Явно НЕ ставим prometheus.io/scrape: аннотации проставляет сам Istio
+        # (meshConfig.enablePrometheusMerge), и жёсткое значение здесь
+        # перебивало бы их — sidecar'ы просто не попадали в цели Prometheus.
+    spec:
+      serviceAccountName: {{ $name }}
+      imagePullSecrets:
+        - name: {{ $root.Values.global.imagePullSecret }}
+      containers:
+        - name: {{ $name }}
+          image: "{{ $root.Values.global.imageRegistry }}/{{ $name }}:{{ $root.Values.global.imageTag }}"
+          imagePullPolicy: {{ $root.Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $d.port }}
+          env:
+            {{- if $svc.database }}
+            # Логин/пароль тянутся из Secret и подставляются в DSN через
+            # $(VAR) — открытым текстом в манифесте пароля нет.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.global.postgresSecret }}
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.global.postgresSecret }}
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ $root.Values.global.postgresHost }}:5432/{{ $svc.database }}"
+            {{- end }}
+            {{- if $svc.mongoDb }}
+            - name: MONGO_URL
+              value: {{ $root.Values.global.mongoUrl | quote }}
+            - name: MONGO_DB_NAME
+              value: {{ $svc.mongoDb | quote }}
+            {{- end }}
+            {{- if $svc.kafka }}
+            - name: KAFKA_BROKER
+              value: {{ $root.Values.global.kafkaBootstrap | quote }}
+            {{- end }}
+            {{- range $e := $svc.env }}
+            - name: {{ $e.name }}
+              {{- if $e.secretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $e.secretName }}
+                  key: {{ $e.secretKey }}
+              {{- else }}
+              value: {{ $e.value | quote }}
+              {{- end }}
+            {{- end }}
+          # Пробы бьют в /health — эндпоинт уже был в сервисах из Блока 1,
+          # менять код не потребовалось.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # Сервисы с БД накатывают Alembic-миграции до старта uvicorn,
+            # поэтому холодный старт даём длинный (до 100 с), а liveness
+            # при этом не успевает убить под.
+            failureThreshold: 20
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+{{ toYaml $d.resources | indent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/part-of: booking-platform
+spec:
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+  ports:
+    # Имя порта с префиксом http- обязательно: по нему Istio определяет
+    # протокол L7 и включает HTTP-телеметрию, retry и circuit breaking.
+    - name: http
+      port: {{ $d.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

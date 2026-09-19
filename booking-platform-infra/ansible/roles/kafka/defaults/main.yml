@@ -1,0 +1,57 @@
+---
+# Неймспейс, в котором живут оператор Strimzi и кластер Kafka.
+kafka_namespace: kafka
+
+# Версия оператора Strimzi и его Helm-чарта.
+strimzi_chart_version: "0.45.0"
+strimzi_release_name: strimzi-kafka-operator
+
+# Имя кластера Kafka (Kafka CR).
+kafka_cluster_name: booking-kafka
+
+# Версия Kafka внутри кластера.
+kafka_version: "3.9.0"
+
+# LOCAL: один узел в роли и controller, и broker (совмещённый режим KRaft),
+# репликация 1. Соответствует тому, как Kafka была развёрнута в Блоке 1
+# (один брокер KRaft без ZooKeeper). Для прода — минимум 3 контроллера
+# и 3 брокера с replication.factor=3 и min.insync.replicas=2.
+kafka_replicas: 1
+kafka_default_replication_factor: 1
+kafka_min_insync_replicas: 1
+kafka_storage_size: 5Gi
+
+# LOCAL: урезанные ресурсы под стенд.
+kafka_resources:
+  requests:
+    memory: 1Gi
+    cpu: 250m
+  limits:
+    memory: 2Gi
+    cpu: "1"
+
+kafka_jvm_xms: 512m
+kafka_jvm_xmx: 1024m
+
+# Топики: список ровно тот же, что создаёт scripts/init-kafka-topics.sh
+# из Блока 1 — партиции и фактор репликации совпадают, чтобы поведение
+# саги в Kubernetes не отличалось от docker-compose.
+kafka_topics:
+  - name: booking.created
+    partitions: 3
+    replicas: 1
+  - name: booking.confirmed
+    partitions: 3
+    replicas: 1
+  - name: booking.cancelled
+    partitions: 3
+    replicas: 1
+  - name: payment.completed
+    partitions: 3
+    replicas: 1
+  - name: payment.failed
+    partitions: 3
+    replicas: 1
+  - name: review.submitted
+    partitions: 3
+    replicas: 1

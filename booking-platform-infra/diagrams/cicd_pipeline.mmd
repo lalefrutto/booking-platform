@@ -1,0 +1,67 @@
+---
+title: CI/CD — от коммита до пода (Блок 2, Часть 5)
+---
+flowchart LR
+    DEV(["Разработчик"])
+
+    subgraph SRC["Репозиторий приложения<br/>gitops/booking-platform"]
+        CODE["services/*<br/>исходники 6 сервисов"]
+        WF[".gitea/workflows/ci.yaml<br/>синтаксис GitHub Actions"]
+    end
+
+    subgraph CI["CI — Gitea Actions"]
+        RUNNER["act_runner<br/>self-hosted, в кластере<br/>+ sidecar dind"]
+        JOB1["job: build<br/>matrix из 6 сервисов"]
+        JOB2["job: bump-and-deploy"]
+    end
+
+    subgraph BUILD["Сборка образа"]
+        KAN["Kaniko Job в неймспейсе ci<br/>контекст — git://<br/>БЕЗ docker.sock<br/>БЕЗ privileged"]
+        REG[("Registry k3d<br/>registry.localhost:5000<br/>booking/service:TAG")]
+    end
+
+    subgraph GITOPS["GitOps-репозиторий<br/>gitops/booking-platform-infra"]
+        VALS["charts/booking-platform/values.yaml<br/>global.imageTag"]
+        APPS["argocd/apps/*.yaml"]
+    end
+
+    subgraph CD["CD — ArgoCD"]
+        ROOT["Application root<br/>App of Apps"]
+        APP["Application booking-platform<br/>automated + prune + selfHeal"]
+    end
+
+    subgraph K8S["Кластер"]
+        DEPLOY["Deployment x6<br/>rolling update"]
+        PODS["Поды с новым образом"]
+    end
+
+    DEV -->|git push| CODE
+    CODE -->|"push в main,<br/>paths: services/**"| RUNNER
+    WF -.->|описывает| RUNNER
+    RUNNER --> JOB1
+    JOB1 -->|"kubectl apply<br/>SA ci-kaniko, права только на Job'ы"| KAN
+    KAN -->|"клонирует контекст"| CODE
+    KAN -->|"docker push"| REG
+    JOB1 --> JOB2
+    JOB2 -->|"sed: imageTag -> новый тег<br/>git commit + push"| VALS
+
+    VALS --> APP
+    APPS --> ROOT
+    ROOT -->|создаёт| APP
+    APP -->|"обнаружил дрейф<br/>-> sync"| DEPLOY
+    DEPLOY --> PODS
+    REG -.->|"imagePullSecret"| PODS
+
+    APP -.->|"selfHeal: ручная правка<br/>в кластере откатывается"| DEPLOY
+
+    classDef src fill:#e6f0ff,stroke:#2b6cb0
+    classDef ci fill:#e6fffa,stroke:#319795
+    classDef build fill:#fff7e6,stroke:#b7791f
+    classDef cd fill:#e6ffed,stroke:#2f855a
+    classDef k8s fill:#f3e8ff,stroke:#6b46c1
+
+    class CODE,WF,VALS,APPS src
+    class RUNNER,JOB1,JOB2 ci
+    class KAN,REG build
+    class ROOT,APP cd
+    class DEPLOY,PODS k8s

@@ -1,0 +1,45 @@
+! Шаблон конфигурации Keepalived. Подставляются переменные окружения
+! из entrypoint.sh: KA_STATE, KA_PRIORITY, KA_INTERFACE, KA_VIP, KA_ROUTER_ID.
+
+global_defs {
+    router_id ${HOSTNAME}
+    enable_script_security
+    script_user root
+}
+
+! Если локальный HAProxy умер — снижаем приоритет и отдаём VIP соседу.
+vrrp_script chk_haproxy {
+    script "/usr/bin/curl -sf http://127.0.0.1:8404/ -o /dev/null"
+    interval 2
+    weight -40
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_BOOKING {
+    state ${KA_STATE}
+    interface ${KA_INTERFACE}
+    virtual_router_id ${KA_ROUTER_ID}
+    priority ${KA_PRIORITY}
+    advert_int 1
+
+    ! В docker-сети мультикаст ненадёжен, поэтому VRRP-объявления шлём
+    ! юникастом напрямую соседу.
+    unicast_src_ip ${KA_UNICAST_SRC}
+    unicast_peer {
+        ${KA_UNICAST_PEER}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass bookingvip
+    }
+
+    virtual_ipaddress {
+        ${KA_VIP}/16 dev ${KA_INTERFACE}
+    }
+
+    track_script {
+        chk_haproxy
+    }
+}

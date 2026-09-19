@@ -1,0 +1,118 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: booking-istio
+spec:
+  profile: default
+
+  meshConfig:
+    # Телеметрия доступа — её будет собирать Prometheus/Loki из Части 4.
+    accessLogFile: /dev/stdout
+    accessLogEncoding: JSON
+    defaultConfig:
+      # Sidecar поднимается ДО контейнера приложения: иначе Kafka-consumer
+      # в момент старта уходит в сеть раньше прокси и получает отказ.
+      holdApplicationUntilProxyStarts: true
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+      # По умолчанию Istio отдаёт наружу лишь свой урезанный набор метрик, и
+      # сырые счётчики Envoy (в том числе outlier detection и retry) в
+      # /stats/prometheus не попадают. Без этого фильтра ни в Grafana, ни в
+      # `pilot-agent request GET stats` невозможно увидеть, что circuit breaker
+      # реально сработал.
+      proxyStatsMatcher:
+        inclusionRegexps:
+          - ".*outlier_detection.*"
+          - ".*upstream_rq_retry.*"
+          - ".*upstream_rq_5xx.*"
+          - ".*upstream_rq_pending.*"
+          - ".*circuit_breakers.*"
+      tracing:
+        # Транспорт трейсов — Zipkin-формат на порт 9411 OpenTelemetry Collector.
+        #
+        # ПОЧЕМУ НЕ extensionProvider opentelemetry: при связке
+        # meshConfig.extensionProviders[otel-tracing] + ресурс Telemetry
+        # Istio 1.31 корректно заводит кластер outbound|4317 и проставляет
+        # random_sampling, но НЕ добавляет сам provider в http_connection_manager.
+        # В итоге Envoy не отправляет ни одного спана: в его статистике по
+        # кластеру коллектора нули, в Tempo пусто. Классический zipkin-путь
+        # работает без оговорок, а коллектор всё равно остаётся единой
+        # точкой приёма (у него включён zipkin receiver).
+        zipkin:
+          address: opentelemetry-collector.observability.svc.cluster.local:9411
+        # LOCAL: 100% сэмплирование, чтобы на демонстрации трейс находился
+        # гарантированно. В проде — 1-10%, иначе объём спанов неподъёмный.
+        #
+        # ВАЖНО: именно это значение попадает в random_sampling листенера
+        # Envoy. Одного randomSamplingPercentage в ресурсе Telemetry
+        # недостаточно: провайдер трассировки он подключает, а частоту
+        # сэмплирования оставляет дефолтной (1%), и при небольшом трафике
+        # в Tempo не попадает вообще ничего.
+        sampling: 100.0
+    enablePrometheusMerge: true
+    extensionProviders:
+      # Глобальный Envoy Rate Limit Service (Часть 3), бэкенд — Valkey.
+      - name: booking-ratelimit
+        envoyExtAuthzGrpc: {}
+      - name: otel-tracing
+        opentelemetry:
+          service: opentelemetry-collector.observability.svc.cluster.local
+          port: 4317
+
+  values:
+    global:
+      proxy:
+        # LOCAL: sidecar'ов будет много (6 сервисов x реплики), режем requests.
+        resources:
+          requests:
+            cpu: 20m
+            memory: 96Mi
+          limits:
+            memory: 512Mi
+    pilot:
+      autoscaleEnabled: false
+
+  components:
+    pilot:
+      k8s:
+        replicaCount: 1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            memory: 1536Mi
+
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          replicaCount: 1
+          hpaSpec:
+            maxReplicas: 3
+            minReplicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          service:
+            # NodePort вместо LoadBalancer: перед gateway стоит собственная
+            # пара HAProxy + Keepalived (VIP), а не облачный балансировщик.
+            type: NodePort
+            ports:
+              - name: http2
+                port: 80
+                targetPort: 8080
+                nodePort: 30080
+              - name: https
+                port: 443
+                targetPort: 8443
+                nodePort: 30443
+
+    # egressGateway не нужен: внешних исходящих интеграций у прототипа нет
+    # (платёжный шлюз и SMS-провайдер замоканы внутри сервисов).
+    egressGateways:
+      - name: istio-egressgateway
+        enabled: false

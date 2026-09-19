@@ -1,0 +1,25 @@
+# Override для демонстрации балансировки нагрузки Traefik (ТЗ п.8).
+#
+# Фиксированные порты 8001-8006 публикуются для отладки и не позволяют поднять
+# несколько реплик одного сервиса (конфликт порта на хосте). Этот файл убирает
+# публикацию портов — доступ остаётся через гейтвей, как в проде.
+#
+# Запуск:
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale catalog-service=3
+# Проверка распределения:
+#   for i in $(seq 1 30); do curl -s http://localhost/api/hotels/health; echo; done
+#   (в дашборде Traefik у сервиса catalog-rooms@docker будет 3 сервера)
+
+services:
+  user-service:
+    ports: !reset []
+  catalog-service:
+    ports: !reset []
+  booking-service:
+    ports: !reset []
+  payment-service:
+    ports: !reset []
+  notification-service:
+    ports: !reset []
+  review-service:
+    ports: !reset []

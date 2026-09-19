@@ -1,0 +1,71 @@
+# Gitea — git-сервер внутри кластера.
+#
+# ЗАЧЕМ ОН ВООБЩЕ ПОЯВИЛСЯ (отклонение от плана, см. CHANGES_AND_REPORT_BLOCK2.md):
+# каталог проекта не является git-репозиторием и у него нет ни GitHub-, ни
+# GitLab-remote. ArgoCD принципиально работает только с git-URL — «синкать
+# локальную папку» он не умеет. Self-hosted runner GitHub Actions тоже
+# требует существующего репозитория на github.com и токена регистрации.
+#
+# Gitea закрывает оба вопроса локально: это и git-remote для ArgoCD,
+# и CI-движок (Gitea Actions полностью совместим по синтаксису с GitHub
+# Actions — те же `on:`, `jobs:`, `steps:`, `uses:`).
+
+fullnameOverride: gitea
+
+replicaCount: 1
+
+# LOCAL: встроенная SQLite вместо PostgreSQL-кластера и без кэша —
+# на стенде с одним инстансом этого достаточно.
+#
+# ВАЖНО: в чарте 10.x подчарт кэша называется redis-cluster (не valkey-*).
+# С включённым по умолчанию redis-cluster установка падает: он тянет
+# bitnami/redis-cluster, а Bitnami в 2025 убрала неподдерживаемые теги
+# из Docker Hub -> ImagePullBackOff, а init-контейнер Gitea уходит в
+# CrashLoopBackOff, ожидая недоступный кэш. Та же проблема, что с
+# bitnami/kafka в Блоке 1.
+postgresql-ha:
+  enabled: false
+postgresql:
+  enabled: false
+redis-cluster:
+  enabled: false
+redis:
+  enabled: false
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+service:
+  http:
+    type: NodePort
+    port: 3000
+    nodePort: 30301  # 30300 занят Grafana
+
+gitea:
+  admin:
+    username: gitops
+    password: gitops-admin-pw
+    email: gitops@booking.local
+  config:
+    database:
+      DB_TYPE: sqlite3
+    server:
+      # ROOT_URL должен совпадать с адресом, по которому к Gitea ходят
+      # ArgoCD и runner изнутри кластера, иначе ссылки на клоны будут битыми.
+      ROOT_URL: http://gitea-http.ci.svc.cluster.local:3000/
+      DOMAIN: gitea-http.ci.svc.cluster.local
+    service:
+      DISABLE_REGISTRATION: true
+    # Gitea Actions — совместимый с GitHub Actions движок CI.
+    actions:
+      ENABLED: true
+  metrics:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi

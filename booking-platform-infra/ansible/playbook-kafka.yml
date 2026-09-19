@@ -1,0 +1,12 @@
+---
+# Разворачивает Kafka в кластере: оператор Strimzi -> Kafka CR (KRaft) -> топики.
+#
+# Хостов в привычном смысле нет: Ansible работает локально и обращается к
+# Kubernetes API через kubernetes.core, поэтому connection: local.
+- name: Kafka на Strimzi для booking-platform
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  roles:
+    - kafka

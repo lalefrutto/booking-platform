@@ -1,0 +1,116 @@
+# CI/CD пайплайн booking-platform (Часть 5).
+#
+# Синтаксис — GitHub Actions. Выполняется self-hosted раннером act_runner
+# в кластере; файл без изменений переносится в .github/workflows/, если
+# проект переедет на GitHub (см. CHANGES_AND_REPORT_BLOCK2.md о том,
+# почему в этом стенде используется Gitea Actions).
+#
+# Поток: Kaniko собирает образ БЕЗ доступа к docker-сокету -> пушит в
+# in-cluster registry -> пайплайн бампает тег в Helm values gitops-репозитория
+# -> ArgoCD (automated + selfHeal) сам раскатывает новую версию.
+
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/**'
+      - '.gitea/workflows/ci.yaml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Тег образа (по умолчанию — номер сборки)'
+        required: false
+
+env:
+  REGISTRY: registry.localhost:5000
+  IMAGE_PREFIX: booking
+  GITOPS_REPO: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+
+jobs:
+  build:
+    runs-on: k8s
+    strategy:
+      matrix:
+        service:
+          - user-service
+          - catalog-service
+          - booking-service
+          - payment-service
+          - notification-service
+          - review-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Определить тег образа
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Собираем ${{ matrix.service }}:$TAG"
+
+      # Раннер выполняет шаги в обычных контейнерах, а не в подах, поэтому
+      # in-cluster credentials ему недоступны: kubeconfig приходит секретом.
+      # Учётка ci-kaniko имеет права только на Job'ы в неймспейсе ci.
+      - name: Настроить kubectl
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          apk add --no-cache curl >/dev/null 2>&1 || true
+          curl -sSLo /usr/local/bin/kubectl             "https://dl.k8s.io/release/v1.31.5/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kubectl
+          mkdir -p "$HOME/.kube"
+          echo "$KUBECONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          kubectl -n ci get jobs >/dev/null && echo "доступ к API кластера есть"
+
+      # Kaniko запускается как Job в кластере: сборка идёт в userspace,
+      # docker-сокет не пробрасывается, привилегии контейнера не нужны.
+      - name: Сборка и push через Kaniko
+        run: |
+          chmod +x ./ci/kaniko-build.sh
+          ./ci/kaniko-build.sh "${{ matrix.service }}" "${{ steps.tag.outputs.tag }}"
+
+  bump-and-deploy:
+    runs-on: k8s
+    needs: build
+    steps:
+      - name: Определить тег образа
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Бамп тега в Helm values gitops-репозитория
+        env:
+          GITOPS_USER: ${{ secrets.GITOPS_USER }}
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          set -e
+          apk add --no-cache git sed 2>/dev/null || (apt-get update -qq && apt-get install -y -qq git)
+
+          git clone "http://${GITOPS_USER}:${GITOPS_TOKEN}@gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git" /tmp/gitops
+          cd /tmp/gitops
+
+          sed -i "s|^  imageTag: .*|  imageTag: \"${{ steps.tag.outputs.tag }}\"|" charts/booking-platform/values.yaml
+          grep -n "imageTag" charts/booking-platform/values.yaml
+
+          git config user.email "ci@booking.local"
+          git config user.name "CI Pipeline"
+          git add charts/booking-platform/values.yaml
+          git commit -m "CI: обновлён тег образов до ${{ steps.tag.outputs.tag }} (сборка #${{ github.run_number }})" || echo "нечего коммитить"
+          git push origin main
+
+      # Дальше ничего делать не нужно: Application booking-platform в ArgoCD
+      # настроен на automated sync + selfHeal и подхватит коммит сам.
+      - name: Итог
+        run: |
+          echo "Тег ${{ steps.tag.outputs.tag }} закоммичен в gitops-репозиторий."
+          echo "ArgoCD синхронизирует booking-platform автоматически."

@@ -1,0 +1,56 @@
+---
+# Микросервисы booking-platform. Именно это Application подхватывает
+# результат работы CI: пайплайн бампает global.imageTag в
+# charts/booking-platform/values.yaml, ArgoCD видит коммит и раскатывает
+# новый образ (Часть 5).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: booking-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: charts/booking-platform
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: keda.enabled
+          value: "true"
+        - name: istio.enabled
+          value: "true"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: booking
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      # Неймспейс и ServiceAccount'ы создаёт Terraform — ArgoCD не должен
+      # считать их «лишними» и удалять.
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+  # HPA/KEDA меняют число реплик на лету. Без этого игнора ArgoCD
+  # постоянно видел бы дрейф и возвращал replicas к значению из чарта,
+  # фактически отключая автоскейлинг.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

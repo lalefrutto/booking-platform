@@ -1,0 +1,148 @@
+---
+# Единая точка входа. Повторяет роль Traefik из Блока 1: те же внешние пути
+# /api/... и то же отбрасывание префикса /api перед отправкой в сервис.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: booking-gateway
+  namespace: booking
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: booking-api
+  namespace: booking
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - booking-gateway
+  http:
+    # Порядок важен: Envoy берёт первое совпадение по префиксу.
+    - name: users
+      match:
+        - uri:
+            prefix: /api/users
+      rewrite:
+        uri: /users
+      route:
+        - destination:
+            host: user-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: &api_retries
+        attempts: 3
+        perTryTimeout: 2s
+        retryOn: "5xx,reset,connect-failure,refused-stream"
+      timeout: 15s
+
+    - name: hotels
+      match:
+        - uri:
+            prefix: /api/hotels
+      rewrite:
+        uri: /hotels
+      route:
+        - destination:
+            host: catalog-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: *api_retries
+      timeout: 15s
+
+    - name: rooms
+      match:
+        - uri:
+            prefix: /api/rooms
+      rewrite:
+        uri: /rooms
+      route:
+        - destination:
+            host: catalog-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: *api_retries
+      timeout: 15s
+
+    - name: bookings
+      match:
+        - uri:
+            prefix: /api/bookings
+      rewrite:
+        uri: /bookings
+      route:
+        - destination:
+            host: booking-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      # POST /api/bookings НЕ идемпотентен: повтор после сетевой ошибки мог бы
+      # создать вторую бронь. Ретраим только на явные отказы соединения,
+      # когда запрос гарантированно не дошёл до сервиса.
+      retries:
+        attempts: 2
+        perTryTimeout: 5s
+        retryOn: "connect-failure,refused-stream"
+      timeout: 20s
+
+    - name: payments
+      match:
+        - uri:
+            prefix: /api/payments
+      rewrite:
+        uri: /payments
+      route:
+        - destination:
+            host: payment-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: *api_retries
+      timeout: 15s
+
+    - name: notifications
+      match:
+        - uri:
+            prefix: /api/notifications
+      rewrite:
+        uri: /notifications
+      route:
+        - destination:
+            host: notification-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: *api_retries
+      timeout: 15s
+
+    - name: reviews
+      match:
+        - uri:
+            prefix: /api/reviews
+      rewrite:
+        uri: /reviews
+      route:
+        - destination:
+            host: review-service.booking.svc.cluster.local
+            port:
+              number: 8000
+      retries: *api_retries
+      timeout: 15s
+---
+# Весь трафик внутри mesh — только по mTLS. В Блоке 1 сервисы ходили друг
+# к другу открытым HTTP; в Kubernetes это закрывается бесплатно за счёт Istio.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: booking
+spec:
+  mtls:
+    mode: STRICT

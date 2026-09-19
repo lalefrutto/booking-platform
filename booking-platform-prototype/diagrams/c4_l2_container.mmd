@@ -1,0 +1,50 @@
+C4Container
+    title Booking Platform — Container Diagram (C4 L2)
+
+    Person(client, "Клиент (Гость / Админ отеля)")
+
+    System_Boundary(platform, "Booking Platform") {
+        Container(gateway, "API Gateway", "Traefik", "Маршрутизация, балансировка, rate limiting")
+
+        Container(userSvc, "User Service", "Python/FastAPI", "Аутентификация (JWT), профили")
+        Container(catalogSvc, "Catalog Service", "Python/FastAPI", "Каталог отелей/номеров, доступность")
+        Container(bookingSvc, "Booking Service", "Python/FastAPI", "Оркестрация бронирований (saga)")
+        Container(paymentSvc, "Payment Service", "Python/FastAPI", "Обработка платежей")
+        Container(notificationSvc, "Notification Service", "Python/FastAPI", "Email/SMS уведомления")
+        Container(reviewSvc, "Review Service", "Python/FastAPI", "Отзывы и рейтинги")
+
+        ContainerDb(pgCluster, "PostgreSQL", "RDBMS", "4 БД (по одной на сервис): user_db, catalog_db, booking_db, payment_db")
+        ContainerDb(mongoCluster, "MongoDB", "NoSQL", "2 БД: notification_log (холодное хранилище), reviews (гибкая схема)")
+        ContainerQueue(kafka, "Kafka", "Event Bus", "booking.*, payment.*")
+        ContainerDb(cache, "Valkey", "Cache", "Кэш доступности номеров (TTL 30с), короткие блокировки брони")
+    }
+
+    System_Ext(ext, "Внешние системы", "Платёжный шлюз, Email/SMS провайдер")
+
+    Rel(client, gateway, "HTTPS / REST")
+    Rel(gateway, userSvc, "route")
+    Rel(gateway, catalogSvc, "route")
+    Rel(gateway, bookingSvc, "route")
+    Rel(gateway, paymentSvc, "route")
+    Rel(gateway, reviewSvc, "route")
+    Rel(gateway, notificationSvc, "route")
+
+    Rel(userSvc, pgCluster, "SQL")
+    Rel(catalogSvc, pgCluster, "SQL")
+    Rel(bookingSvc, pgCluster, "SQL")
+    Rel(paymentSvc, pgCluster, "SQL")
+    Rel(notificationSvc, mongoCluster, "Mongo Wire Protocol")
+    Rel(reviewSvc, mongoCluster, "Mongo Wire Protocol")
+    Rel(catalogSvc, cache, "RESP: кэш доступности")
+    Rel(bookingSvc, cache, "RESP: короткая блокировка брони (SET NX PX)")
+
+    Rel(bookingSvc, catalogSvc, "проверка доступности, HTTP")
+    Rel(bookingSvc, kafka, "produce/consume")
+    Rel(paymentSvc, kafka, "produce/consume")
+    Rel(catalogSvc, kafka, "consume (read-model)")
+    Rel(notificationSvc, kafka, "consume")
+    Rel(reviewSvc, kafka, "consume")
+    Rel(paymentSvc, ext, "HTTPS")
+    Rel(notificationSvc, ext, "HTTPS/SMTP")
+
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")

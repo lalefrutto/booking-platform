@@ -1,0 +1,65 @@
+---
+# Правила трафика Istio: Gateway, VirtualService с маршрутами /api/...,
+# PeerAuthentication (mTLS STRICT).
+#
+# Сам Istio (istiod, ingress gateway) ставится istioctl вне GitOps: это
+# компонент уровня платформы, у него свой цикл обновления и CRD, которые
+# должны существовать до того, как ArgoCD применит эти манифесты.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-traffic
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: istio
+    directory:
+      recurse: false
+      include: "gateway.yaml"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: booking
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+---
+# Rate Limit Service и его EnvoyFilter'ы.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-ratelimit
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: istio
+    directory:
+      recurse: false
+      include: "ratelimit-*.yaml"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

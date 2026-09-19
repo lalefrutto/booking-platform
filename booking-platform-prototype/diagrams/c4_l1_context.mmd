@@ -1,0 +1,17 @@
+C4Context
+    title Booking Platform — System Context (C4 L1)
+
+    Person(guest, "Гость / Пользователь", "Ищет отели, бронирует номера, оставляет отзывы")
+    Person(hotelAdmin, "Администратор отеля", "Управляет отелями, номерами и доступностью")
+
+    System(bookingPlatform, "Booking Platform", "Микросервисная платформа онлайн-бронирования отелей: поиск, бронирование, оплата, уведомления, отзывы")
+
+    System_Ext(paymentGw, "Платёжный шлюз", "Внешний провайдер эквайринга (мок в прототипе)")
+    System_Ext(emailProvider, "Email/SMS провайдер", "Внешний сервис доставки уведомлений (мок в прототипе)")
+
+    Rel(guest, bookingPlatform, "Ищет номера, создаёт бронирования, оплачивает, читает/пишет отзывы", "HTTPS")
+    Rel(hotelAdmin, bookingPlatform, "Управляет каталогом отелей и номеров", "HTTPS")
+    Rel(bookingPlatform, paymentGw, "Инициирует списание средств", "HTTPS/REST")
+    Rel(bookingPlatform, emailProvider, "Отправляет письма и SMS о статусе брони", "SMTP/HTTPS API")
+
+    UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")

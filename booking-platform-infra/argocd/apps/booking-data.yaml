@@ -1,0 +1,38 @@
+---
+# Слой данных: PostgreSQL (4 логические БД), MongoDB, Valkey.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: booking-data
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: charts/booking-data
+    helm:
+      valueFiles:
+        - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: booking-data
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+
+  # PVC у StatefulSet неизменяемы после создания: ArgoCD иначе бесконечно
+  # пытался бы «починить» их и показывал приложение как OutOfSync.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates

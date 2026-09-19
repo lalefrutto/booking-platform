@@ -1,0 +1,75 @@
+---
+title: Observability — потоки телеметрии (Блок 2, Часть 4)
+---
+flowchart TB
+    subgraph SOURCES["Источники телеметрии"]
+        SIDE["Sidecar'ы Envoy<br/>6 микросервисов"]
+        IGW["Istio Ingress Gateway"]
+        APPS["Контейнеры приложений<br/>stdout"]
+        CIL["Cilium + Hubble<br/>eBPF-потоки"]
+        KEXP["Kafka Exporter<br/>Strimzi"]
+        KEDAM["KEDA operator"]
+        KSM["kube-state-metrics<br/>+ node-exporter"]
+    end
+
+    subgraph COLLECT["Единая точка приёма"]
+        OTEL["OpenTelemetry Collector<br/>DaemonSet<br/>receivers: otlp, zipkin, filelog<br/>processors: k8sattributes,<br/>memory_limiter, batch"]
+    end
+
+    subgraph STORE["Хранилища"]
+        PROM[("Prometheus<br/>метрики, ретенция 6ч")]
+        LOKI[("Loki<br/>логи, SingleBinary")]
+        TEMPO[("Tempo<br/>трейсы, monolithic")]
+    end
+
+    subgraph CONSUME["Потребление"]
+        GRAF["Grafana<br/>дашборд «Booking Platform — Блок 2»"]
+        AM["Alertmanager<br/>4 группы правил"]
+    end
+
+    subgraph ALERTS["Алерты"]
+        A1["Лаг Kafka > 50 / > 500"]
+        A2["Доля 5xx в Istio > 5% / > 25%"]
+        A3["Rate limiter недоступен<br/>или массовые 429"]
+        A4["Рестарт-луп пода,<br/>HPA упёрся в maxReplicas"]
+    end
+
+    SIDE -->|"spans, Zipkin :9411<br/>sampling 100%"| OTEL
+    IGW -->|spans| OTEL
+    APPS -->|"filelog: /var/log/pods"| OTEL
+
+    OTEL -->|"OTLP"| TEMPO
+    OTEL -->|"OTLP /otlp/v1/logs"| LOKI
+
+    SIDE -.->|"scrape :15020/stats/prometheus"| PROM
+    IGW -.-> PROM
+    CIL -.->|":9962, :9965"| PROM
+    KEXP -.->|"PodMonitor"| PROM
+    KEDAM -.->|"ServiceMonitor"| PROM
+    KSM -.-> PROM
+    TEMPO -.->|"remote write:<br/>span-метрики, service graph"| PROM
+
+    PROM --> GRAF
+    LOKI --> GRAF
+    TEMPO --> GRAF
+    LOKI -.->|"derivedFields: TraceID<br/>лог -> трейс"| TEMPO
+    TEMPO -.->|"tracesToLogs<br/>трейс -> лог"| LOKI
+
+    PROM -->|"PrometheusRule"| AM
+    AM --> A1
+    AM --> A2
+    AM --> A3
+    AM --> A4
+    AM --> GRAF
+
+    classDef src fill:#e6f0ff,stroke:#2b6cb0
+    classDef col fill:#fff7e6,stroke:#b7791f
+    classDef st fill:#e6ffed,stroke:#2f855a
+    classDef cons fill:#f3e8ff,stroke:#6b46c1
+    classDef al fill:#fde8e8,stroke:#c53030
+
+    class SIDE,IGW,APPS,CIL,KEXP,KEDAM,KSM src
+    class OTEL col
+    class PROM,LOKI,TEMPO st
+    class GRAF,AM cons
+    class A1,A2,A3,A4 al

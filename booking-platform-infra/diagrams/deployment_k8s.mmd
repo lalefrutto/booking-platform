@@ -1,0 +1,132 @@
+---
+title: Booking Platform — Deployment Diagram (Блок 2)
+---
+flowchart TB
+    Client(["Клиент<br/>Гость / Админ отеля"])
+
+    subgraph HA["Слой высокой доступности (контейнеры Docker)"]
+        VIP{{"Плавающий VIP 172.20.0.200<br/>VRRP / Keepalived"}}
+        HAP1["HAProxy #1<br/>MASTER, priority 150"]
+        HAP2["HAProxy #2<br/>BACKUP, priority 100"]
+    end
+
+    subgraph K3D["Кластер k3d «booking» — 1 control-plane + 2 worker"]
+
+        subgraph ISTIO["istio-system"]
+            IGW["Istio Ingress Gateway<br/>NodePort 30080"]
+            ISTIOD["istiod<br/>xDS, mTLS CA"]
+            RLS["Envoy Rate Limit Service<br/>20 rps на клиентский IP"]
+            RLVK[("Valkey<br/>счётчики лимитов")]
+        end
+
+        subgraph BOOKING["booking — микросервисы (+ sidecar Envoy)"]
+            USR["user-service<br/>HPA 1..5"]
+            CAT["catalog-service<br/>HPA 1..5"]
+            BOK["booking-service<br/>HPA 1..5"]
+            PAY["payment-service<br/>KEDA 1..6 по лагу Kafka"]
+            NOT["notification-service<br/>HPA 1..5"]
+            REV["review-service<br/>HPA 1..5"]
+        end
+
+        subgraph DATA["booking-data — без sidecar"]
+            PG[("PostgreSQL 16<br/>user_db, catalog_db,<br/>booking_db, payment_db")]
+            MG[("MongoDB 7<br/>notification_log, reviews")]
+            VK[("Valkey 7<br/>кэш доступности,<br/>блокировки брони")]
+        end
+
+        subgraph KAFKANS["kafka — оператор Strimzi"]
+            KFK["Kafka KRaft<br/>6 топиков, 3 партиции"]
+            KEXP["Kafka Exporter<br/>kafka_consumergroup_lag"]
+        end
+
+        subgraph PLATFORM["Платформенные компоненты"]
+            CIL["Cilium CNI + Hubble<br/>eBPF, network policies"]
+            KEDA["KEDA<br/>ScaledObject"]
+            ARGO["ArgoCD<br/>App of Apps"]
+        end
+
+        subgraph OBS["observability — стек LGTM"]
+            OTEL["OpenTelemetry Collector<br/>DaemonSet"]
+            PROM["Prometheus<br/>+ Alertmanager"]
+            LOKI[("Loki — логи")]
+            TEMPO[("Tempo — трейсы")]
+            GRAF["Grafana"]
+        end
+
+        subgraph CINS["ci"]
+            GITEA["Gitea<br/>git + Actions"]
+            RUN["act_runner<br/>self-hosted runner"]
+            KAN["Kaniko Job<br/>сборка без docker.sock"]
+        end
+
+        REG[("Registry k3d<br/>registry.localhost:5000")]
+    end
+
+    Client -->|HTTP| VIP
+    VIP -.->|владеет один из узлов| HAP1
+    VIP -.-> HAP2
+    HAP1 -->|"round-robin, health-check<br/>/api/hotels/health"| IGW
+    HAP2 --> IGW
+
+    IGW -->|"проверка лимита, gRPC"| RLS
+    RLS --> RLVK
+    ISTIOD -.->|конфигурация xDS| IGW
+
+    IGW -->|/api/users| USR
+    IGW -->|"/api/hotels, /api/rooms"| CAT
+    IGW -->|/api/bookings| BOK
+    IGW -->|/api/payments| PAY
+    IGW -->|/api/notifications| NOT
+    IGW -->|/api/reviews| REV
+
+    BOK -->|"единственный синхронный вызов<br/>mTLS + retry + outlier detection"| CAT
+
+    USR --> PG
+    CAT --> PG
+    CAT --> VK
+    BOK --> PG
+    BOK -->|"SET NX PX — блокировка брони"| VK
+    PAY --> PG
+    NOT --> MG
+    REV --> MG
+
+    BOK <-->|"booking.*"| KFK
+    PAY <-->|"payment.*"| KFK
+    CAT -->|consume| KFK
+    NOT -->|consume| KFK
+    REV -->|consume| KFK
+    KFK --> KEXP
+
+    KEXP -->|лаг| KEDA
+    KEDA -->|масштабирует| PAY
+
+    OTEL --> LOKI
+    OTEL --> TEMPO
+    IGW -.->|"spans, Zipkin-формат"| OTEL
+    PROM --> GRAF
+    LOKI --> GRAF
+    TEMPO --> GRAF
+    KEXP -.->|метрики| PROM
+    CIL -.->|метрики| PROM
+
+    GITEA --> RUN
+    RUN -->|создаёт Job| KAN
+    KAN -->|push образа| REG
+    RUN -->|"бамп тега в values"| GITEA
+    ARGO -->|"следит за git"| GITEA
+    ARGO -->|"sync + selfHeal"| BOOKING
+    REG -.->|pull образов| BOOKING
+
+    classDef ha fill:#fde8e8,stroke:#c53030
+    classDef mesh fill:#e6f0ff,stroke:#2b6cb0
+    classDef app fill:#e6ffed,stroke:#2f855a
+    classDef data fill:#fff7e6,stroke:#b7791f
+    classDef obs fill:#f3e8ff,stroke:#6b46c1
+    classDef ci fill:#e6fffa,stroke:#319795
+
+    class VIP,HAP1,HAP2 ha
+    class IGW,ISTIOD,RLS,RLVK mesh
+    class USR,CAT,BOK,PAY,NOT,REV app
+    class PG,MG,VK,KFK,KEXP,REG data
+    class OTEL,PROM,LOKI,TEMPO,GRAF obs
+    class GITEA,RUN,KAN,ARGO ci

@@ -1,0 +1,19 @@
+---
+# KafkaTopic CR на каждый топик платформы. Список синхронизирован с
+# booking-platform-prototype/scripts/init-kafka-topics.sh из Блока 1.
+{% for topic in kafka_topics %}
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: {{ topic.name }}
+  namespace: {{ kafka_namespace }}
+  labels:
+    strimzi.io/cluster: {{ kafka_cluster_name }}
+spec:
+  partitions: {{ topic.partitions }}
+  replicas: {{ topic.replicas }}
+  config:
+    retention.ms: 604800000
+    segment.bytes: 1073741824
+---
+{% endfor %}

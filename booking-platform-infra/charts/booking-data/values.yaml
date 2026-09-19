@@ -1,0 +1,48 @@
+# Слой данных. Все три хранилища — StatefulSet с одной репликой:
+# это ровно то, что было в docker-compose Блока 1, перенесённое в Kubernetes.
+#
+# LOCAL: одна реплика на каждое хранилище и небольшие PVC. В проде PostgreSQL
+# и MongoDB разворачиваются своими операторами (CloudNativePG, MongoDB
+# Community Operator) с репликацией и бэкапами.
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  storage: 4Gi
+  # Логические БД по одной на сервис (паттерн database-per-service).
+  databases:
+    - user_db
+    - catalog_db
+    - booking_db
+    - payment_db
+  # Креды берутся из Secret, созданного Terraform (модуль secrets),
+  # открытым текстом в values не лежат.
+  credentialsSecret: postgres-credentials
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+mongo:
+  enabled: true
+  image: mongo:7
+  storage: 4Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+valkey:
+  enabled: true
+  image: valkey/valkey:7-alpine
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi

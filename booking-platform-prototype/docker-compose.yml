@@ -1,0 +1,288 @@
+networks:
+  booking-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mongo_data:
+  kafka_data:
+
+services:
+
+  # ───────────────────────── Routing layer ─────────────────────────
+  traefik:
+    image: traefik:v3.7
+    container_name: traefik
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    environment:
+      # Docker Engine 29 больше не принимает API-версии ниже 1.40, а docker-провайдер
+      # Traefik по умолчанию ходит с версией 1.24 и получает 400 Bad Request.
+      DOCKER_API_VERSION: "1.44"
+    ports:
+      - "80:80"       # единая точка входа для всех API
+      - "8081:8080"   # Traefik dashboard (только для локальной разработки)
+    volumes:
+      - ./gateway/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./gateway/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - booking-net
+    depends_on:
+      - user-service
+      - catalog-service
+      - booking-service
+      - payment-service
+      - review-service
+      - notification-service
+
+  # ───────────────────────── Данные ─────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - booking-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - booking-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:7-alpine
+    container_name: valkey
+    ports:
+      - "6379:6379"
+    networks:
+      - booking-net
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ───────────────────────── Событийная шина ─────────────────────────
+  kafka:
+    # Официальный образ Apache Kafka (KRaft, без ZooKeeper).
+    # bitnami/kafka:3.7 больше не публикуется в Docker Hub, см. CHANGES_VS_TZ.md.
+    image: apache/kafka:3.9.1
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: ${KAFKA_KRAFT_CLUSTER_ID:-jEZ_Ey8-SSiiLm0Z0Fzkvg}
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - booking-net
+    healthcheck:
+      # /opt/kafka/bin нет в PATH этого образа — вызываем по абсолютному пути.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts/init-kafka-topics.sh:/init-kafka-topics.sh:ro
+    entrypoint: ["/bin/bash", "/init-kafka-topics.sh"]
+    networks:
+      - booking-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: booking-platform
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8080:8080"
+    networks:
+      - booking-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ───────────────────────── Микросервисы ─────────────────────────
+  user-service:
+    build: ./services/user-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/user_db
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+    ports:
+      - "8001:8000"
+    networks:
+      - booking-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.user.rule=PathPrefix(`/api/users`)"
+      - "traefik.http.routers.user.entrypoints=web"
+      - "traefik.http.routers.user.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.services.user.loadbalancer.server.port=8000"
+
+  catalog-service:
+    build: ./services/catalog-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/catalog_db
+      CACHE_URL: redis://valkey:6379/0
+      KAFKA_BROKER: kafka:9092
+      AVAILABILITY_TTL_SECONDS: "30"
+    ports:
+      - "8002:8000"
+    networks:
+      - booking-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.catalog-hotels.rule=PathPrefix(`/api/hotels`)"
+      - "traefik.http.routers.catalog-hotels.entrypoints=web"
+      - "traefik.http.routers.catalog-hotels.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.routers.catalog-hotels.service=catalog-hotels"
+      - "traefik.http.routers.catalog-rooms.rule=PathPrefix(`/api/rooms`)"
+      - "traefik.http.routers.catalog-rooms.entrypoints=web"
+      - "traefik.http.routers.catalog-rooms.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.routers.catalog-rooms.service=catalog-rooms"
+      - "traefik.http.services.catalog-hotels.loadbalancer.server.port=8000"
+      - "traefik.http.services.catalog-rooms.loadbalancer.server.port=8000"
+
+  booking-service:
+    build: ./services/booking-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/booking_db
+      CATALOG_SERVICE_URL: http://catalog-service:8000
+      KAFKA_BROKER: kafka:9092
+      LOCK_URL: redis://valkey:6379/1
+    ports:
+      - "8003:8000"
+    networks:
+      - booking-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      catalog-service:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.booking.rule=PathPrefix(`/api/bookings`)"
+      - "traefik.http.routers.booking.entrypoints=web"
+      - "traefik.http.routers.booking.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.services.booking.loadbalancer.server.port=8000"
+
+  payment-service:
+    build: ./services/payment-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/payment_db
+      KAFKA_BROKER: kafka:9092
+      # Доля отказов мок-эквайринга; 1.0 — детерминированная ветка payment.failed
+      PAYMENT_FAILURE_RATE: ${PAYMENT_FAILURE_RATE:-0.1}
+    ports:
+      - "8004:8000"
+    networks:
+      - booking-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.payment.rule=PathPrefix(`/api/payments`)"
+      - "traefik.http.routers.payment.entrypoints=web"
+      - "traefik.http.routers.payment.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.services.payment.loadbalancer.server.port=8000"
+
+  notification-service:
+    build: ./services/notification-service
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB_NAME: notification_log
+      KAFKA_BROKER: kafka:9092
+    ports:
+      - "8005:8000"
+    networks:
+      - booking-net
+    depends_on:
+      mongo:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notification.rule=PathPrefix(`/api/notifications`)"
+      - "traefik.http.routers.notification.entrypoints=web"
+      - "traefik.http.routers.notification.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.services.notification.loadbalancer.server.port=8000"
+
+  review-service:
+    build: ./services/review-service
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB_NAME: reviews
+      KAFKA_BROKER: kafka:9092
+    ports:
+      - "8006:8000"
+    networks:
+      - booking-net
+    depends_on:
+      mongo:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.review.rule=PathPrefix(`/api/reviews`)"
+      - "traefik.http.routers.review.entrypoints=web"
+      - "traefik.http.routers.review.middlewares=global-rate-limit@file,api-strip-prefix@file"
+      - "traefik.http.services.review.loadbalancer.server.port=8000"

@@ -1,0 +1,83 @@
+---
+# Подключает HTTP-фильтр ratelimit к Ingress Gateway и описывает кластер,
+# через который Envoy ходит в Rate Limit Service по gRPC.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: ratelimit-filter
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        # Фильтр ставится ПЕРЕД router — иначе запрос уже уйдёт в бэкенд.
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ratelimit
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+            domain: booking-ratelimit
+            failure_mode_deny: false   # RLS недоступен -> пропускаем трафик
+            timeout: 0.5s
+            rate_limit_service:
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: rate_limit_cluster
+    - applyTo: CLUSTER
+      match:
+        cluster:
+          service: ratelimit.istio-system.svc.cluster.local
+      patch:
+        operation: ADD
+        value:
+          name: rate_limit_cluster
+          type: STRICT_DNS
+          connect_timeout: 1s
+          lb_policy: ROUND_ROBIN
+          http2_protocol_options: {}
+          load_assignment:
+            cluster_name: rate_limit_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: ratelimit.istio-system.svc.cluster.local
+                          port_value: 8081
+---
+# Описывает, ИЗ ЧЕГО складывается дескриптор запроса. Здесь — из IP клиента,
+# поэтому лимит считается на источник, как global-rate-limit в Блоке 1.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: ratelimit-actions
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: VIRTUAL_HOST
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost:
+            name: "*:80"
+      patch:
+        operation: MERGE
+        value:
+          rate_limits:
+            - actions:
+                - remote_address: {}

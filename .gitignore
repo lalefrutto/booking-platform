@@ -1,0 +1,9 @@
+﻿booking-platform-infra/terraform/.terraform/
+booking-platform-infra/terraform/*.tfstate*
+booking-platform-infra/terraform/*.tfvars
+**/kubeconfig*
+**/*.kubeconfig
+**/.env
+**/*.retry
+**/__pycache__/
+**/*.pyc

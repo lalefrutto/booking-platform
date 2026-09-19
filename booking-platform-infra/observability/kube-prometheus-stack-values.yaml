@@ -1,0 +1,188 @@
+# kube-prometheus-stack: Prometheus + Alertmanager + Grafana + экспортеры.
+#
+# LOCAL: одна реплика каждого компонента, короткая ретенция, без Thanos.
+
+fullnameOverride: kps
+
+prometheus:
+  prometheusSpec:
+    replicas: 1
+    retention: 6h
+    retentionSize: 3GB
+    # Забираем ServiceMonitor/PodMonitor из ВСЕХ неймспейсов, а не только
+    # помеченные релизом — иначе не подхватятся мониторы Istio и Cilium.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    # Нужен, чтобы metrics-generator Tempo мог слать span-метрики и
+    # service graph в Prometheus по remote write.
+    enableRemoteWriteReceiver: true
+    resources:
+      requests:
+        cpu: 200m
+        memory: 768Mi
+      limits:
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+    # Дополнительные цели, которые не отдают ServiceMonitor:
+    # метрики Cilium/Hubble и sidecar'ов Istio (envoy-stats).
+    additionalScrapeConfigs:
+      - job_name: cilium-agent
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kube-system]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_k8s_app]
+            action: keep
+            regex: cilium
+          - source_labels: [__address__]
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:9962
+            target_label: __address__
+      - job_name: hubble
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kube-system]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_k8s_app]
+            action: keep
+            regex: cilium
+          - source_labels: [__address__]
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:9965
+            target_label: __address__
+      - job_name: istio-proxy
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            action: keep
+            regex: istio-proxy
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__address__]
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:15020
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+        metrics_path: /stats/prometheus
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+  config:
+    route:
+      # Группируем по alertname, чтобы на демо было видно отдельные алерты.
+      group_by: ['alertname', 'namespace']
+      group_wait: 10s
+      group_interval: 30s
+      repeat_interval: 1h
+      receiver: 'default'
+      routes:
+        - matchers: ['severity = critical']
+          receiver: 'critical'
+          group_wait: 5s
+    receivers:
+      # LOCAL: реального канала доставки (Slack/почта/Telegram) на стенде нет,
+      # поэтому оба получателя — заглушки. Факт срабатывания виден в UI
+      # Alertmanager и в Grafana. В проде сюда подставляются webhook'и.
+      - name: 'default'
+      - name: 'critical'
+
+grafana:
+  replicas: 1
+  adminPassword: admin
+  # ServiceMonitor Grafana по умолчанию идёт с scrapeTimeout 30s, что больше
+  # нашего глобального scrapeInterval 15s — оператор Prometheus такой монитор
+  # отбраковывает ("scrapeTimeout greater than scrapeInterval").
+  serviceMonitor:
+    interval: 60s
+  defaultDashboardsTimezone: browser
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  service:
+    type: NodePort
+    nodePort: 30300
+  # Источники данных: метрики из Prometheus (ставится этим же чартом),
+  # логи из Loki, трейсы из Tempo.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki.observability.svc.cluster.local:3100
+      jsonData:
+        # Связка лог -> трейс: по TraceID в логе можно прыгнуть в Tempo.
+        derivedFields:
+          - name: TraceID
+            matcherRegex: "trace_id=(\\w+)"
+            url: "$${__value.raw}"
+            datasourceUid: tempo
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3100
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+        serviceMap:
+          datasourceUid: prometheus
+  sidecar:
+    dashboards:
+      enabled: true
+      # Дашборды подхватываются из ConfigMap с этой меткой (см. grafana-dashboard.yaml).
+      label: grafana_dashboard
+      searchNamespace: ALL
+
+# LOCAL: на нодах k3d (контейнеры в WSL2) часть системных метрик недоступна,
+# а kubelet-цели дублируются. Отключаем шумные компоненты, которые для
+# задания не нужны.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi

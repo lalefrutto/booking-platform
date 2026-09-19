@@ -1,0 +1,21 @@
+http:
+  middlewares:
+    api-strip-prefix:
+      stripPrefix:
+        prefixes:
+          - "/api"
+
+    # Rate Limiter: ограничивает поток запросов на клиента (по исходному IP).
+    # average — устойчивая скорость запросов/сек, burst — допустимый всплеск.
+    global-rate-limit:
+      rateLimit:
+        average: 20
+        burst: 40
+        period: "1s"
+
+    # Объявлен, но СОЗНАТЕЛЬНО не подключён ни к одному роутеру: повтор
+    # POST /api/bookings после сетевой ошибки мог бы создать вторую бронь.
+    # Безопасно включать только для идемпотентных GET-роутеров.
+    retry-on-network-error:
+      retry:
+        attempts: 2

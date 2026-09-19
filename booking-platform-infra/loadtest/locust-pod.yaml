@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: locust
+  namespace: booking
+  labels:
+    app: locust
+  annotations:
+    sidecar.istio.io/inject: "false"
+spec:
+  restartPolicy: Never
+  containers:
+    - name: locust
+      image: locustio/locust:2.32.2
+      command:
+        - sh
+        - -c
+        - |
+          locust -f /mnt/locustfile.py --headless \
+            -H http://istio-ingressgateway.istio-system.svc.cluster.local \
+            -u 300 -r 10 -t 6m \
+            --csv /tmp/run --only-summary
+      volumeMounts:
+        - name: lf
+          mountPath: /mnt
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+  volumes:
+    - name: lf
+      configMap:
+        name: locustfile

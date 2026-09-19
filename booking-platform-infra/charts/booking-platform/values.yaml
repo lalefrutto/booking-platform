@@ -1,0 +1,111 @@
+##############################################################################
+# Значения по умолчанию для всех шести микросервисов.
+#
+# Пароли и секреты сюда НЕ попадают: и БД, и JWT прокидываются через
+# secretKeyRef на Secret'ы, созданные Terraform (модуль terraform/modules/secrets).
+##############################################################################
+
+global:
+  # Registry внутри k3d. Тег образа бампает пайплайн Части 5 (Kaniko -> commit
+  # в gitops-ветку -> ArgoCD синкает).
+  imageRegistry: registry.localhost:5111/booking
+  imageTag: "1.0.8"
+  imagePullPolicy: IfNotPresent
+  imagePullSecret: registry-pull-secret
+
+  # Адреса зависимостей. Docker-compose DNS (postgres/mongo/valkey/kafka)
+  # заменён на полные DNS-имена Service'ов Kubernetes.
+  postgresHost: postgres.booking-data.svc.cluster.local
+  mongoUrl: mongodb://mongo.booking-data.svc.cluster.local:27017
+  valkeyHost: valkey.booking-data.svc.cluster.local
+  kafkaBootstrap: booking-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+
+  postgresSecret: postgres-credentials
+  jwtSecret: jwt-secret
+
+# Общие настройки устойчивости трафика (Часть 3).
+istio:
+  enabled: false
+  # Outlier detection = circuit breaker: под, давший подряд N 5xx,
+  # временно исключается из пула балансировки.
+  outlierDetection:
+    consecutive5xxErrors: 3
+    interval: 5s
+    baseEjectionTime: 30s
+    maxEjectionPercent: 50
+  retries:
+    attempts: 3
+    perTryTimeout: 2s
+    retryOn: "5xx,reset,connect-failure,refused-stream"
+
+keda:
+  enabled: false
+
+defaults:
+  replicas: 1
+  port: 8000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+##############################################################################
+# Сервисы. Ключ карты = имя сервиса = имя Deployment/Service/ServiceAccount.
+##############################################################################
+services:
+
+  user-service:
+    database: user_db
+    env:
+      - name: JWT_SECRET
+        secretName: jwt-secret
+        secretKey: JWT_SECRET
+
+  catalog-service:
+    database: catalog_db
+    kafka: true
+    env:
+      - name: CACHE_URL
+        value: "redis://valkey.booking-data.svc.cluster.local:6379/0"
+      - name: AVAILABILITY_TTL_SECONDS
+        value: "30"
+
+  booking-service:
+    database: booking_db
+    kafka: true
+    env:
+      - name: CATALOG_SERVICE_URL
+        value: "http://catalog-service:8000"
+      - name: LOCK_URL
+        value: "redis://valkey.booking-data.svc.cluster.local:6379/1"
+
+  payment-service:
+    database: payment_db
+    kafka: true
+    env:
+      - name: PAYMENT_FAILURE_RATE
+        value: "0.1"
+    # payment-service — потребитель booking.created: именно на нём
+    # демонстрируется масштабирование по лагу Kafka (Часть 1).
+    keda:
+      enabled: true
+      topic: booking.created
+      consumerGroup: payment-service
+      lagThreshold: "5"
+      minReplicas: 1
+      maxReplicas: 6
+
+  notification-service:
+    mongoDb: notification_log
+    kafka: true
+
+  review-service:
+    mongoDb: reviews
+    kafka: true

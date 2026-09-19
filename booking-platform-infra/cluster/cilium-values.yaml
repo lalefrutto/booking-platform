@@ -1,0 +1,64 @@
+# Cilium как CNI для k3d-кластера booking.
+#
+# Часть значений продиктована тем, что ноды k3d — это контейнеры внутри WSL2,
+# а не настоящие хосты. Всё, что является компромиссом локального стенда,
+# помечено комментарием LOCAL.
+
+# ВАЖНО (выяснено экспериментально, см. docs/DECISIONS.md):
+# k3s, запущенный с --flannel-backend=none, НЕ пишет секцию
+# [plugins."io.containerd.grpc.v1.cri".cni] в config.toml, поэтому containerd
+# использует свои компилируемые умолчания: conf_dir=/etc/cni/net.d и
+# bin_dir=/opt/cni/bin. Пути из большинства гайдов по k3s
+# (/var/lib/rancher/k3s/agent/etc/cni/net.d и /bin) приводят к тому, что
+# Cilium стартует, но ноды висят в NotReady "cni plugin not initialized",
+# а поды — в ContainerCreating с 'failed to find plugin "cilium-cni"'.
+cni:
+  binPath: /opt/cni/bin
+  confPath: /etc/cni/net.d
+
+# LOCAL: одна реплика оператора вместо двух — на трёх нодах в 24 ГБ
+# вторая реплика только занимает память. В проде — 2+ для HA.
+operator:
+  replicas: 1
+
+# kube-proxy оставлен включённым (см. cluster/k3d-cluster.yaml): полная
+# замена kube-proxy средствами Cilium на WSL2 требует совпадения версий
+# ядра и стабильно не поднимается в контейнерных нодах k3d.
+kubeProxyReplacement: false
+
+ipam:
+  mode: kubernetes
+
+# Hubble — наблюдаемость сетевых потоков на eBPF (требование Части 1).
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - icmp
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"
+
+# Политики L3/L4/L7 на eBPF — ради них Cilium и выбран вместо flannel.
+policyEnforcementMode: default
+
+# Метрики самого Cilium — их будет забирать Prometheus из Части 4.
+prometheus:
+  enabled: true
+operator_prometheus: {}
+
+# LOCAL: сильно урезанные requests, чтобы стек целиком помещался в стенд.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+securityContext:
+  privileged: true

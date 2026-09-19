@@ -1,0 +1,174 @@
+---
+# Envoy Rate Limit Service (envoyproxy/ratelimit) + собственный Valkey под счётчики.
+#
+# ПОЧЕМУ ОТДЕЛЬНЫЙ ИНСТАНС VALKEY, а не тот, что обслуживает кэш доступности
+# и блокировки бронирования из Блока 1:
+#   1. Разный характер нагрузки. Кэш доступности — это LRU с вытеснением;
+#      счётчики rate limit вытеснять нельзя, иначе лимит просто перестаёт
+#      действовать. Держать их в одном инстансе — значит поставить защиту
+#      от перегрузки в зависимость от поведения кэша.
+#   2. Разные домены отказа. Rate limiter — компонент слоя ingress и должен
+#      продолжать работать, даже если у приложения проблемы с кэшем.
+#   3. Разное владение и жизненный цикл: booking-data принадлежит команде
+#      приложения, istio-system — платформе.
+#   4. envoyproxy/ratelimit умеет только REDIS_URL вида host:port и не
+#      позволяет изолироваться номером базы, как это делает booking-service
+#      (у него блокировки лежат в db=1, а кэш — в db=0).
+# Технология та же (Valkey 7), меняется только инстанс.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratelimit-valkey
+  namespace: istio-system
+  labels:
+    app: ratelimit-valkey
+spec:
+  selector:
+    app: ratelimit-valkey
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratelimit-valkey
+  namespace: istio-system
+  labels:
+    app: ratelimit-valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ratelimit-valkey
+  template:
+    metadata:
+      labels:
+        app: ratelimit-valkey
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:7-alpine
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratelimit-config
+  namespace: istio-system
+data:
+  # Домен должен совпадать с domain в EnvoyFilter.
+  booking-ratelimit.yaml: |
+    domain: booking-ratelimit
+    descriptors:
+      # Лимит на клиентский IP — тот же смысл, что у global-rate-limit
+      # на Traefik в Блоке 1 (20 запросов в секунду с одного источника).
+      #
+      # ВАЖНО: алгоритмы разные. Traefik использует token bucket (average 20,
+      # burst 40), Envoy RLS — фиксированное окно в 1 секунду без burst.
+      # Поэтому поведение на границе отличается: см. CHANGES_AND_REPORT_BLOCK2.md.
+      - key: remote_address
+        rate_limit:
+          unit: second
+          requests_per_unit: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratelimit
+  namespace: istio-system
+  labels:
+    app: ratelimit
+spec:
+  selector:
+    app: ratelimit
+  ports:
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+    - name: http-debug
+      port: 6070
+      targetPort: 6070
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratelimit
+  namespace: istio-system
+  labels:
+    app: ratelimit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ratelimit
+  template:
+    metadata:
+      labels:
+        app: ratelimit
+    spec:
+      containers:
+        - name: ratelimit
+          image: envoyproxy/ratelimit:master
+          command: ["/bin/ratelimit"]
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: REDIS_SOCKET_TYPE
+              value: tcp
+            - name: REDIS_URL
+              value: ratelimit-valkey.istio-system.svc.cluster.local:6379
+            - name: USE_STATSD
+              value: "false"
+            - name: RUNTIME_ROOT
+              value: /data
+            - name: RUNTIME_SUBDIRECTORY
+              value: ratelimit
+            - name: RUNTIME_WATCH_ROOT
+              value: "false"
+            - name: RUNTIME_IGNOREDOTFILES
+              value: "true"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "6070"
+            - name: GRPC_PORT
+              value: "8081"
+          ports:
+            - name: grpc
+              containerPort: 8081
+            - name: http-debug
+              containerPort: 6070
+          volumeMounts:
+            # Сервис читает конфиг из <RUNTIME_ROOT>/<RUNTIME_SUBDIRECTORY>/config/
+            - name: config
+              mountPath: /data/ratelimit/config
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 6070
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: ratelimit-config

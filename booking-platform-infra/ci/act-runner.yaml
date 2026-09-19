@@ -1,0 +1,126 @@
+---
+# Self-hosted runner для Gitea Actions.
+#
+# Синтаксис workflow'ов полностью совместим с GitHub Actions, поэтому файлы
+# из .gitea/workflows/ можно без изменений перенести в .github/workflows/,
+# если проект переедет на GitHub.
+#
+# Раннер работает в режиме `docker`: шаги выполняются в контейнерах,
+# которые он создаёт в sidecar'е docker-in-docker. Сборка образов при этом
+# всё равно идёт через Kaniko (отдельный Job в кластере, без доступа к
+# docker-сокету) — так требует план Части 5.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: act-runner-token
+  namespace: ci
+type: Opaque
+stringData:
+  # Подставляется скриптом ci/setup-runner.sh из API Gitea.
+  token: "PLACEHOLDER"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: act-runner-config
+  namespace: ci
+data:
+  config.yaml: |
+    log:
+      level: info
+    runner:
+      capacity: 2
+      timeout: 30m
+      fetch_timeout: 10s
+      fetch_interval: 3s
+      labels:
+        - "ubuntu-latest:docker://node:20-bookworm"
+        - "k8s:docker://alpine:3.20"
+    cache:
+      enabled: false
+    container:
+      network: bridge
+      privileged: true
+      # Раннер и его job-контейнеры должны видеть Gitea и registry по тем же
+      # именам, что и остальной кластер.
+      options: "--add-host=gitea-http.ci.svc.cluster.local:10.43.153.77"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: act-runner
+  namespace: ci
+  labels:
+    app: act-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: act-runner
+  template:
+    metadata:
+      labels:
+        app: act-runner
+    spec:
+      containers:
+        # Docker-in-Docker: изолированный движок для шагов workflow.
+        # Хостовый docker-сокет НЕ монтируется — это осознанно: доступ к нему
+        # из CI равносилен root на ноде.
+        - name: dind
+          image: docker:27-dind
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          args:
+            - dockerd
+            - --host=tcp://0.0.0.0:2375
+            - --insecure-registry=registry.localhost:5000
+            - --insecure-registry=registry.localhost:5111
+          volumeMounts:
+            - name: docker-storage
+              mountPath: /var/lib/docker
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 2Gi
+
+        - name: runner
+          image: gitea/act_runner:0.2.11
+          env:
+            - name: DOCKER_HOST
+              value: tcp://localhost:2375
+            - name: GITEA_INSTANCE_URL
+              value: http://gitea-http.ci.svc.cluster.local:3000
+            - name: GITEA_RUNNER_REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: act-runner-token
+                  key: token
+            - name: GITEA_RUNNER_NAME
+              value: k8s-runner
+            - name: CONFIG_FILE
+              value: /config/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: runner-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+
+      volumes:
+        - name: config
+          configMap:
+            name: act-runner-config
+        - name: docker-storage
+          emptyDir: {}
+        - name: runner-data
+          emptyDir: {}

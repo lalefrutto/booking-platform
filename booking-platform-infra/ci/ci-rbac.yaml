@@ -1,0 +1,50 @@
+---
+# Учётка, под которой CI создаёт Job'ы Kaniko.
+#
+# Прав ровно столько, сколько нужно пайплайну: заводить и удалять Job'ы
+# в неймспейсе ci и читать логи их подов. Ни доступа к секретам приложения,
+# ни прав в неймспейсе booking у CI нет.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-kaniko
+  namespace: ci
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-kaniko
+  namespace: ci
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-kaniko
+  namespace: ci
+subjects:
+  - kind: ServiceAccount
+    name: ci-kaniko
+    namespace: ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ci-kaniko
+---
+# Долгоживущий токен: начиная с Kubernetes 1.24 ServiceAccount больше не
+# получает токен автоматически, а CI-раннер живёт вне кластера и не может
+# пользоваться projected-токеном пода.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-kaniko-token
+  namespace: ci
+  annotations:
+    kubernetes.io/service-account.name: ci-kaniko
+type: kubernetes.io/service-account-token

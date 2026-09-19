@@ -1,0 +1,76 @@
+# Loki в режиме SingleBinary: все компоненты в одном поде, хранилище —
+# локальный PVC.
+#
+# LOCAL: в проде Loki разворачивается в distributed-режиме с объектным
+# хранилищем (S3/GCS) и отдельными read/write путями.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 24h
+    # Нагрузочный тест Части 6 генерирует всплеск логов — поднимаем лимиты,
+    # иначе Loki начнёт отдавать 429 и часть логов потеряется.
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+    per_stream_rate_limit: 8MB
+    per_stream_rate_limit_burst: 16MB
+    max_query_series: 10000
+    allow_structured_metadata: true
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# Компоненты distributed-режима отключены.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# Чарт по умолчанию тянет кэши на memcached — на стенде они не нужны.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+
+gateway:
+  enabled: false
+
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false

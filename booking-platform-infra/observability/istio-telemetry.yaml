@@ -1,0 +1,30 @@
+---
+# Включает отправку трейсов из sidecar'ов Istio в OpenTelemetry Collector,
+# откуда они уходят в Tempo. Провайдер otel-tracing объявлен в
+# istio/istio-operator.yaml (meshConfig.extensionProviders).
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-tracing
+  namespace: istio-system
+spec:
+  tracing:
+    # Провайдер и частота сэмплирования заданы в meshConfig
+    # (istio/istio-operator.yaml: defaultConfig.tracing.zipkin + sampling).
+    # Здесь только добавляем к спанам тег с именем кластера.
+    - customTags:
+        cluster:
+          literal:
+            value: booking
+---
+# Добавляет в метрики Istio измерение по имени сервиса-источника —
+# нужно для панели ошибок 5xx в разрезе сервисов.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-metrics
+  namespace: istio-system
+spec:
+  metrics:
+    - providers:
+        - name: prometheus

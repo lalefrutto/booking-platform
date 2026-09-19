@@ -1,0 +1,31 @@
+C4Component
+    title Booking Service — Component Diagram (C4 L3)
+
+    Container(gateway, "API Gateway", "Traefik")
+    ContainerDb(bookingDb, "booking_db", "PostgreSQL")
+    ContainerDb(cache, "Valkey", "Cache")
+    ContainerQueue(kafka, "Kafka", "Event Bus")
+    Container(catalogSvc, "Catalog Service", "FastAPI")
+
+    Container_Boundary(bookingSvc, "Booking Service") {
+        Component(api, "Booking API", "FastAPI Router", "REST-эндпоинты: создать/отменить/получить бронирование")
+        Component(orchestrator, "Booking Orchestrator", "Saga Coordinator", "Управляет жизненным циклом брони: PENDING → CONFIRMED/CANCELLED")
+        Component(availabilityClient, "Availability Client", "HTTP Client", "Синхронно проверяет доступность номера в Catalog Service")
+        Component(lock, "Booking Lock", "Valkey SET NX PX", "Короткая распределённая блокировка на (номер, даты) против race condition")
+        Component(repo, "Booking Repository", "SQLAlchemy", "CRUD-доступ к таблице bookings")
+        Component(producer, "Event Producer", "kafka-python Producer", "Публикует booking.created / booking.confirmed / booking.cancelled")
+        Component(consumer, "Payment Event Consumer", "kafka-python Consumer", "Слушает payment.completed / payment.failed и обновляет статус брони")
+    }
+
+    Rel(gateway, api, "HTTP", "REST/JSON")
+    Rel(api, orchestrator, "вызывает")
+    Rel(orchestrator, lock, "взять/снять блокировку")
+    Rel(lock, cache, "SET NX PX / DEL", "RESP")
+    Rel(orchestrator, availabilityClient, "проверить доступность")
+    Rel(availabilityClient, catalogSvc, "GET /rooms/{id}/availability", "HTTP")
+    Rel(orchestrator, repo, "создать/обновить бронь")
+    Rel(repo, bookingDb, "SQL")
+    Rel(orchestrator, producer, "опубликовать событие")
+    Rel(producer, kafka, "produce", "Kafka Protocol")
+    Rel(kafka, consumer, "consume payment.*", "Kafka Protocol")
+    Rel(consumer, orchestrator, "завершить сагу (confirm/cancel)")

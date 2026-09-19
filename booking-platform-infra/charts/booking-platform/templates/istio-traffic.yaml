@@ -1,0 +1,65 @@
+{{- $root := . }}
+{{- if .Values.istio.enabled }}
+{{- range $name, $svc := .Values.services }}
+{{- $od := $root.Values.istio.outlierDetection }}
+{{- $rt := $root.Values.istio.retries }}
+---
+# DestinationRule: circuit breaker (лимиты соединений) + outlier detection
+# (исключение нездоровых подов из пула). Применяется ко ВСЕМ межсервисным
+# вызовам, включая единственный синхронный путь booking-service -> catalog-service.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/part-of: booking-platform
+spec:
+  host: {{ $name }}.{{ $root.Release.Namespace }}.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 10
+        # Après этого числа повторов Envoy перестаёт ретраить на этот хост.
+        maxRetries: 3
+    outlierDetection:
+      # Под, ответивший 5xx подряд N раз, выводится из балансировки
+      # на baseEjectionTime — это и есть размыкание цепи.
+      consecutive5xxErrors: {{ $od.consecutive5xxErrors }}
+      interval: {{ $od.interval }}
+      baseEjectionTime: {{ $od.baseEjectionTime }}
+      maxEjectionPercent: {{ $od.maxEjectionPercent }}
+      # Разрешаем выбить даже единственный под: иначе на стенде с одной
+      # репликой circuit breaker никогда не сработал бы.
+      minHealthPercent: 0
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+---
+# VirtualService: таймауты и повторы для внутрикластерных вызовов.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/part-of: booking-platform
+spec:
+  hosts:
+    - {{ $name }}.{{ $root.Release.Namespace }}.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: {{ $name }}.{{ $root.Release.Namespace }}.svc.cluster.local
+            subset: v1
+      timeout: 10s
+      retries:
+        attempts: {{ $rt.attempts }}
+        perTryTimeout: {{ $rt.perTryTimeout }}
+        retryOn: {{ $rt.retryOn | quote }}
+{{- end }}
+{{- end }}

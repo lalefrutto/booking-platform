@@ -1,0 +1,52 @@
+# Tempo (трейсы) в монолитном режиме с локальным хранилищем.
+#
+# Трейсы приходят из Istio: sidecar'ы шлют spans в OpenTelemetry Collector
+# (extensionProvider otel-tracing в istio/istio-operator.yaml), а коллектор
+# экспортирует их сюда по OTLP на порт 4317.
+#
+# ВАЖНО: целиком переопределять `config` в этом чарте нельзя. Своя конфигурация
+# без `server.http_listen_port` заставляет Tempo слушать порт 3200 по
+# умолчанию, тогда как Service и пробы чарта ожидают 3100. Readiness-проба
+# начинает падать, kubelet шлёт SIGTERM, и под уходит в CrashLoopBackOff
+# с exit code 0 («Tempo stopped») — без единой строки ERROR в логах.
+# Поэтому настраиваем только через штатные ключи values.
+
+fullnameOverride: tempo
+
+tempo:
+  retention: 24h
+
+  # Приёмники: OTLP по gRPC и HTTP (их использует OTel Collector).
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Генерация метрик из спанов даёт service graph и span-метрики в Grafana.
+  # Требует включённого remote-write receiver на стороне Prometheus
+  # (prometheusSpec.enableRemoteWriteReceiver: true).
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: http://kps-prometheus.observability.svc.cluster.local:9090/api/v1/write
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+persistence:
+  enabled: true
+  size: 5Gi

@@ -1,0 +1,103 @@
+---
+# Роль разворачивает Kafka в Kubernetes: оператор Strimzi -> кластер Kafka
+# в режиме KRaft -> топики платформы.
+#
+# Используются модули kubernetes.core (требуют python-пакет kubernetes).
+
+- name: Убедиться, что неймспейс для Kafka существует
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ kafka_namespace }}"
+    state: present
+
+- name: Добавить Helm-репозиторий Strimzi
+  kubernetes.core.helm_repository:
+    name: strimzi
+    repo_url: https://strimzi.io/charts/
+
+- name: Установить оператор Strimzi
+  kubernetes.core.helm:
+    name: "{{ strimzi_release_name }}"
+    chart_ref: strimzi/strimzi-kafka-operator
+    chart_version: "{{ strimzi_chart_version }}"
+    release_namespace: "{{ kafka_namespace }}"
+    create_namespace: false
+    wait: true
+    wait_timeout: 10m
+    values:
+      # Оператор следит только за своим неймспейсом — меньше прав и меньше watch'ей.
+      watchNamespaces: []
+      watchAnyNamespace: false
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 512Mi
+
+- name: Дождаться регистрации CRD Kafka
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: kafkas.kafka.strimzi.io
+  register: kafka_crd
+  until: kafka_crd.resources | length > 0
+  retries: 30
+  delay: 10
+
+- name: Дождаться регистрации CRD KafkaNodePool
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: kafkanodepools.kafka.strimzi.io
+  register: nodepool_crd
+  until: nodepool_crd.resources | length > 0
+  retries: 30
+  delay: 10
+
+- name: Применить Kafka CR (KRaft) и пул узлов
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'kafka-cluster.yaml.j2') | from_yaml_all | list }}"
+
+- name: Дождаться готовности кластера Kafka
+  kubernetes.core.k8s_info:
+    api_version: kafka.strimzi.io/v1beta2
+    kind: Kafka
+    name: "{{ kafka_cluster_name }}"
+    namespace: "{{ kafka_namespace }}"
+  register: kafka_status
+  until: >
+    kafka_status.resources | length > 0 and
+    (kafka_status.resources[0].status.conditions | default([])
+     | selectattr('type', 'equalto', 'Ready')
+     | selectattr('status', 'equalto', 'True') | list | length) > 0
+  retries: 60
+  delay: 15
+
+- name: Создать топики платформы (KafkaTopic CR)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'kafka-topics.yaml.j2') | from_yaml_all | select('truthy') | list }}"
+
+- name: Проверить, что все топики перешли в Ready
+  kubernetes.core.k8s_info:
+    api_version: kafka.strimzi.io/v1beta2
+    kind: KafkaTopic
+    namespace: "{{ kafka_namespace }}"
+  register: topic_status
+  until: >
+    (topic_status.resources | default([])
+     | selectattr('status', 'defined')
+     | map(attribute='status.conditions') | map('default', [], true) | flatten
+     | selectattr('type', 'equalto', 'Ready')
+     | selectattr('status', 'equalto', 'True') | list | length) >= (kafka_topics | length)
+  retries: 40
+  delay: 10
+
+- name: Показать адрес bootstrap-сервиса для микросервисов
+  ansible.builtin.debug:
+    msg: >-
+      KAFKA_BROKER для сервисов:
+      {{ kafka_cluster_name }}-kafka-bootstrap.{{ kafka_namespace }}.svc.cluster.local:9092

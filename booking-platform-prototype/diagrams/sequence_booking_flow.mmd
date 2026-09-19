@@ -1,0 +1,60 @@
+sequenceDiagram
+    autonumber
+    actor U as Гость
+    participant GW as API Gateway (Traefik)
+    participant BS as Booking Service
+    participant CS as Catalog Service
+    participant CACHE as Valkey Cache
+    participant DB as booking_db
+    participant K as Kafka
+    participant PS as Payment Service
+    participant NS as Notification Service
+    participant RS as Review Service
+
+    U->>GW: POST /api/bookings {room_id, dates, user_id}
+    GW->>BS: маршрутизация запроса (rate-limit пройден)
+    BS->>CACHE: SET NX PX lock:booking:{room_id}:{dates}
+    alt блокировка занята другим гостем
+        BS-->>U: 409 Conflict
+    end
+    BS->>CS: GET /rooms/{room_id}/availability?dates=...
+    CS->>CACHE: проверить кэш доступности
+    alt кэш пуст
+        CS->>CS: запрос к catalog_db
+        CS->>CACHE: обновить кэш (TTL)
+    end
+    CS-->>BS: 200 OK { available: true }
+    BS->>DB: SELECT пересекающиеся активные брони (2-я линия защиты)
+    BS->>DB: INSERT booking (status=PENDING)
+    BS->>K: publish booking.created {booking_id, amount}
+    BS->>CACHE: DEL lock (снятие блокировки)
+    BS-->>U: 202 Accepted { booking_id, status: PENDING }
+
+    K-->>PS: consume booking.created
+    PS->>PS: обработать платёж (mock acquiring)
+    alt платёж успешен
+        PS->>K: publish payment.completed {booking_id}
+    else платёж отклонён
+        PS->>K: publish payment.failed {booking_id, reason}
+    end
+
+    K-->>BS: consume payment.completed / payment.failed
+    alt успех
+        BS->>DB: UPDATE booking SET status=CONFIRMED
+        BS->>K: publish booking.confirmed {booking_id, user_id}
+    else отказ
+        BS->>DB: UPDATE booking SET status=CANCELLED
+        BS->>K: publish booking.cancelled {booking_id, reason}
+    end
+
+    K-->>CS: consume booking.confirmed / booking.cancelled
+    CS->>CS: обновить blocked_date_ranges (read-модель)
+    CS->>CACHE: инвалидировать ключи availability:{room_id}:*
+
+    K-->>RS: consume booking.confirmed
+    RS->>RS: выдать право на отзыв (review_eligibility)
+
+    K-->>NS: consume booking.confirmed / booking.cancelled
+    NS->>NS: сформировать письмо/SMS
+    NS->>NS: записать в notification_log (MongoDB)
+    NS--)U: Email/SMS о статусе брони

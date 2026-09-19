@@ -1,0 +1,58 @@
+# k3d-кластер для Блока 2: 1 control-plane + 2 worker.
+#
+# Штатный CNI k3s (flannel) и его network-policy отключены — вместо них ставится
+# Cilium (eBPF + Hubble). Встроенный Traefik k3s тоже отключён: роль ingress
+# выполняет Istio Ingress Gateway (Часть 3).
+#
+# Создать:  k3d cluster create --config cluster/k3d-cluster.yaml
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: booking
+
+servers: 1
+agents: 2
+
+image: rancher/k3s:v1.31.5-k3s1
+
+# Локальный registry для Части 5 (Kaniko собирает образ и пушит сюда,
+# ArgoCD затем разворачивает его в кластер).
+registries:
+  create:
+    name: registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5111"
+
+ports:
+  # NodePort Istio Ingress Gateway пробрасываем наружу для отладки.
+  # Основной путь трафика в Части 3 — через HAProxy + Keepalived (VIP).
+  - port: 8090:30080
+    nodeFilters:
+      - loadbalancer
+  - port: 8453:30443
+    nodeFilters:
+      - loadbalancer
+
+options:
+  k3d:
+    wait: true
+    timeout: "300s"
+  k3s:
+    extraArgs:
+      # CNI ставим свой (Cilium), поэтому flannel и встроенные политики выключаем.
+      - arg: --flannel-backend=none
+        nodeFilters:
+          - server:*
+      - arg: --disable-network-policy
+        nodeFilters:
+          - server:*
+      # Ingress — Istio, встроенный Traefik не нужен (и занял бы порт 80).
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      # kube-proxy оставляем: Cilium в режиме замены kube-proxy на k3d
+      # требует точного совпадения версий ядра хоста и дополнительной настройки,
+      # что на WSL2 нестабильно. См. docs/DECISIONS.md.
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

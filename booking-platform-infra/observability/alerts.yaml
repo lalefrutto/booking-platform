@@ -1,0 +1,215 @@
+---
+# Сбор метрик Kafka Exporter (его разворачивает Strimzi по kafkaExporter
+# в Kafka CR). Даёт kafka_consumergroup_lag для алертов и дашборда.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kafka-exporter
+  namespace: observability
+  labels:
+    release: kps
+spec:
+  namespaceSelector:
+    matchNames:
+      - kafka
+  selector:
+    matchLabels:
+      # У пода Strimzi метка strimzi.io/kind = "Kafka" (это имя CR, а не
+      # компонента); сам компонент различается по component-type.
+      strimzi.io/component-type: kafka-exporter
+  podMetricsEndpoints:
+    - port: tcp-prometheus
+      path: /metrics
+      interval: 15s
+---
+# Метрики KEDA: keda_scaler_metrics_value показывает то значение лага,
+# по которому реально принимается решение о масштабировании.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keda-operator
+  namespace: observability
+  labels:
+    release: kps
+spec:
+  namespaceSelector:
+    matchNames:
+      - keda
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keda-operator
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: booking-platform-alerts
+  namespace: observability
+  labels:
+    release: kps
+spec:
+  groups:
+    ############################################################
+    - name: booking.kafka
+      rules:
+        # Лаг консьюмеров: сага перестала успевать разгребать события.
+        - alert: KafkaConsumerLagHigh
+          expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 50
+          for: 1m
+          labels:
+            severity: warning
+            component: kafka
+          annotations:
+            summary: "Лаг группы {{ $labels.consumergroup }} по топику {{ $labels.topic }}"
+            description: >-
+              Необработанных сообщений: {{ $value }}. Consumer не успевает за
+              producer'ом. Проверить, масштабируется ли сервис через KEDA.
+
+        - alert: KafkaConsumerLagCritical
+          expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 500
+          for: 2m
+          labels:
+            severity: critical
+            component: kafka
+          annotations:
+            summary: "Критический лаг {{ $labels.consumergroup }} / {{ $labels.topic }}"
+            description: "Лаг {{ $value }} сообщений держится больше 2 минут."
+
+        # Consumer group вообще пропала — сервис упал или отвалился от брокера.
+        - alert: KafkaConsumerGroupMissing
+          expr: absent(kafka_consumergroup_lag{consumergroup="payment-service"}) == 1
+          for: 3m
+          labels:
+            severity: critical
+            component: kafka
+          annotations:
+            summary: "Consumer group payment-service не видна в Kafka"
+            description: "Сага не сможет завершить оплату: платежи зависнут в PENDING."
+
+    ############################################################
+    - name: booking.istio
+      rules:
+        # Доля 5xx на входе. istio_requests_total приходит с sidecar'ов.
+        - alert: Istio5xxRateHigh
+          expr: |
+            sum by (destination_service_name) (
+              rate(istio_requests_total{response_code=~"5.."}[2m])
+            )
+            /
+            clamp_min(
+              sum by (destination_service_name) (rate(istio_requests_total[2m])),
+              0.001
+            ) > 0.05
+          for: 1m
+          labels:
+            severity: warning
+            component: istio
+          annotations:
+            summary: "Более 5% ошибок 5xx на {{ $labels.destination_service_name }}"
+            description: "Текущая доля 5xx: {{ $value | humanizePercentage }}."
+
+        - alert: Istio5xxRateCritical
+          expr: |
+            sum by (destination_service_name) (
+              rate(istio_requests_total{response_code=~"5.."}[2m])
+            )
+            /
+            clamp_min(
+              sum by (destination_service_name) (rate(istio_requests_total[2m])),
+              0.001
+            ) > 0.25
+          for: 1m
+          labels:
+            severity: critical
+            component: istio
+          annotations:
+            summary: "Более 25% ошибок 5xx на {{ $labels.destination_service_name }}"
+
+        # Circuit breaker реально выбрасывает поды из балансировки.
+        - alert: IstioOutlierEjectionActive
+          expr: sum by (cluster_name) (envoy_cluster_outlier_detection_ejections_active) > 0
+          for: 1m
+          labels:
+            severity: warning
+            component: istio
+          annotations:
+            summary: "Outlier detection выбил поды из пула {{ $labels.cluster_name }}"
+            description: "Сработал circuit breaker — есть нездоровые эндпоинты."
+
+    ############################################################
+    - name: booking.ratelimit
+      rules:
+        # Сам rate limiter лежит: Envoy настроен failure_mode_deny=false,
+        # поэтому трафик пойдёт без ограничения — это надо видеть сразу.
+        - alert: RateLimiterDown
+          expr: |
+            absent(
+              kube_pod_status_ready{namespace="istio-system", condition="true",
+                                    pod=~"ratelimit-.*"}
+            ) == 1
+          for: 2m
+          labels:
+            severity: critical
+            component: ratelimit
+          annotations:
+            summary: "Envoy Rate Limit Service недоступен"
+            description: >-
+              failure_mode_deny=false, значит лимиты сейчас НЕ применяются
+              и сервисы открыты для всплеска нагрузки.
+
+        # Массовые 429 — либо реальная атака, либо слишком жёсткий лимит.
+        - alert: RateLimitRejectionsHigh
+          expr: |
+            sum(rate(istio_requests_total{response_code="429"}[2m])) > 10
+          for: 2m
+          labels:
+            severity: warning
+            component: ratelimit
+          annotations:
+            summary: "Rate limiter отбивает более 10 запросов/с"
+            description: "429 в секунду: {{ $value }}."
+
+    ############################################################
+    - name: booking.workloads
+      rules:
+        # Рестарт-луп пода.
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace=~"booking|booking-data|kafka|istio-system"
+            }[10m]) > 3
+          for: 2m
+          labels:
+            severity: critical
+            component: workload
+          annotations:
+            summary: "Под {{ $labels.namespace }}/{{ $labels.pod }} в рестарт-лупе"
+            description: "{{ $value }} рестартов за 10 минут."
+
+        - alert: PodNotReady
+          expr: |
+            sum by (namespace, pod) (
+              kube_pod_status_ready{condition="false", namespace=~"booking|booking-data|kafka"}
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: workload
+          annotations:
+            summary: "Под {{ $labels.namespace }}/{{ $labels.pod }} не Ready 5 минут"
+
+        # Автоскейлер упёрся в потолок — дальше расти некуда.
+        - alert: HPAMaxedOut
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="booking"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{namespace="booking"}
+          for: 3m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "{{ $labels.horizontalpodautoscaler }} достиг maxReplicas"
+            description: "Нагрузка выше, чем способен покрыть текущий предел реплик."

@@ -1,0 +1,40 @@
+---
+# Корневое Application паттерна App of Apps.
+#
+# Само по себе оно не разворачивает нагрузку: оно следит за каталогом
+# argocd/apps в репозитории и создаёт из него дочерние Application —
+# по одному на инфраструктурный компонент и на приложение. Добавить новый
+# компонент = положить ещё один YAML в argocd/apps и сделать коммит.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: argocd/apps
+    directory:
+      recurse: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true      # удалённый из git объект удаляется и из кластера
+      selfHeal: true   # ручная правка в кластере откатывается к состоянию git
+    syncOptions:
+      - CreateNamespace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

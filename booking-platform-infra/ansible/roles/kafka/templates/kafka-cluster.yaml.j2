@@ -1,0 +1,85 @@
+---
+# Пул узлов KRaft: один узел совмещает роли controller и broker.
+# Это тот же режим, в котором Kafka работала в Блоке 1 (KRaft, без ZooKeeper),
+# только теперь им управляет оператор Strimzi.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  namespace: {{ kafka_namespace }}
+  labels:
+    strimzi.io/cluster: {{ kafka_cluster_name }}
+spec:
+  replicas: {{ kafka_replicas }}
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: {{ kafka_storage_size }}
+        deleteClaim: false
+  resources:
+{{ kafka_resources | to_nice_yaml(indent=2) | indent(4, true) }}
+  jvmOptions:
+    -Xms: {{ kafka_jvm_xms }}
+    -Xmx: {{ kafka_jvm_xmx }}
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: {{ kafka_cluster_name }}
+  namespace: {{ kafka_namespace }}
+  annotations:
+    # Включает режим KRaft и управление узлами через KafkaNodePool.
+    strimzi.io/kraft: enabled
+    strimzi.io/node-pools: enabled
+spec:
+  kafka:
+    version: {{ kafka_version }}
+    metadataVersion: "3.9-IV0"
+    listeners:
+      # Внутренний слушатель для микросервисов внутри кластера.
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      offsets.topic.replication.factor: {{ kafka_default_replication_factor }}
+      transaction.state.log.replication.factor: {{ kafka_default_replication_factor }}
+      transaction.state.log.min.isr: {{ kafka_min_insync_replicas }}
+      default.replication.factor: {{ kafka_default_replication_factor }}
+      min.insync.replicas: {{ kafka_min_insync_replicas }}
+      # Быстрый ребаланс consumer group — на стенде ждать 3 секунды незачем.
+      group.initial.rebalance.delay.ms: 0
+      auto.create.topics.enable: "false"
+  # Kafka Exporter отдаёт метрику kafka_consumergroup_lag — на ней построены
+  # и алерт на лаг консьюмеров, и панель в Grafana (Часть 4).
+  kafkaExporter:
+    topicRegex: ".*"
+    groupRegex: ".*"
+    resources:
+      requests:
+        memory: 64Mi
+        cpu: 50m
+      limits:
+        memory: 192Mi
+
+  entityOperator:
+    # topicOperator превращает KafkaTopic CR в реальные топики.
+    topicOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 50m
+        limits:
+          memory: 512Mi
+    userOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 50m
+        limits:
+          memory: 512Mi

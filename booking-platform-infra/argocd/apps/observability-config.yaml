@@ -1,0 +1,35 @@
+---
+# Конфигурация наблюдаемости, живущая в git: правила алертов, мониторы
+# сбора метрик и телеметрия Istio.
+#
+# Сами чарты LGTM (Prometheus/Loki/Tempo/OTel) ставятся Helm'ом вне GitOps:
+# их CRD должны существовать раньше, чем ArgoCD применит PrometheusRule
+# и PodMonitor из этого Application.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-config
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    targetRevision: main
+    path: observability
+    directory:
+      recurse: false
+      include: "{alerts.yaml,istio-telemetry.yaml}"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

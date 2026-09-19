@@ -1,0 +1,50 @@
+# Пара HAProxy + Keepalived перед Istio Ingress Gateway.
+#
+# Подключаются к той же docker-сети, что и ноды k3d, и держат плавающий
+# VIP 172.20.0.200. Клиент ходит на VIP; при падении активного узла второй
+# забирает адрес по VRRP за 1-3 секунды.
+#
+# Запуск:  docker compose -f haproxy/docker-compose.yml up -d --build
+#
+# NET_ADMIN нужен, чтобы Keepalived мог навешивать VIP на интерфейс.
+services:
+  haproxy-1:
+    build: .
+    container_name: haproxy-1
+    hostname: haproxy-1
+    cap_add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
+    environment:
+      KA_STATE: MASTER
+      KA_PRIORITY: "150"
+      KA_VIP: 172.20.0.200
+      KA_ROUTER_ID: "51"
+      KA_UNICAST_PEER: 172.20.0.202
+    networks:
+      k3d-booking:
+        ipv4_address: 172.20.0.201
+    ports:
+      # Прямой доступ к каждому узлу — для проверки, что балансировка живая.
+      - "8081:80"
+      - "8404:8404"
+
+  haproxy-2:
+    build: .
+    container_name: haproxy-2
+    hostname: haproxy-2
+    cap_add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
+    environment:
+      KA_STATE: BACKUP
+      KA_PRIORITY: "100"
+      KA_VIP: 172.20.0.200
+      KA_ROUTER_ID: "51"
+      KA_UNICAST_PEER: 172.20.0.201
+    networks:
+      k3d-booking:
+        ipv4_address: 172.20.0.202
+    ports:
+      - "8082:80"
+      - "8405:8404"
+
+networks:
+  k3d-booking:
+    external: true
