@@ -9,7 +9,7 @@ global:
   # Registry внутри k3d. Тег образа бампает пайплайн Части 5 (Kaniko -> commit
   # в gitops-ветку -> ArgoCD синкает).
   imageRegistry: registry.localhost:5111/booking
-  imageTag: "1.0.8"
+  imageTag: "1.0.4"
   imagePullPolicy: IfNotPresent
   imagePullSecret: registry-pull-secret
 
