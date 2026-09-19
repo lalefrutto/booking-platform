@@ -52,7 +52,7 @@ options:
           - server:*
       # kube-proxy оставляем: Cilium в режиме замены kube-proxy на k3d
       # требует точного совпадения версий ядра хоста и дополнительной настройки,
-      # что на WSL2 нестабильно. См. docs/DECISIONS.md.
+      # что на WSL2 нестабильно. См. REPORT.md.
   kubeconfig:
     updateDefaultKubeconfig: true
     switchCurrentContext: true

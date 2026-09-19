@@ -79,7 +79,7 @@ data:
       #
       # ВАЖНО: алгоритмы разные. Traefik использует token bucket (average 20,
       # burst 40), Envoy RLS — фиксированное окно в 1 секунду без burst.
-      # Поэтому поведение на границе отличается: см. CHANGES_AND_REPORT_BLOCK2.md.
+      # Поэтому поведение на границе отличается: см. REPORT.md.
       - key: remote_address
         rate_limit:
           unit: second
