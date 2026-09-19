@@ -16,9 +16,9 @@ spec:
   project: default
 
   source:
-    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    repoURL: git@github.com:lalefrutto/booking-platform.git
     targetRevision: main
-    path: argocd/apps
+    path: booking-platform-infra/argocd/apps
     directory:
       recurse: true
 

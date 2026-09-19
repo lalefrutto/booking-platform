@@ -1,0 +1,110 @@
+---
+# Self-hosted runner GitHub Actions в кластере.
+#
+# Заменяет act_runner (ci/act-runner.yaml), который использовался, пока
+# репозитория на GitHub не существовало и роль git-сервера играла Gitea.
+#
+# Два отличия от варианта с Gitea, оба в пользу этой схемы:
+#   1. Нет sidecar'а docker-in-docker с privileged: true. Шаги workflow —
+#      обычные shell-команды, отдельный docker-движок им не нужен, а сборка
+#      образов и так идёт через Kaniko-Job.
+#   2. Раннер работает ПОДОМ, поэтому пользуется in-cluster credentials
+#      своего ServiceAccount. Прокидывать kubeconfig секретом (KUBECONFIG_B64
+#      в прошлой версии workflow) больше не требуется.
+#
+# Токен регистрации короткоживущий (~1 час) и нужен только при первом старте;
+# дальше раннер хранит собственные учётные данные в /home/runner/.runner.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-runner-token
+  namespace: ci
+type: Opaque
+stringData:
+  # Заполняется скриптом ci/setup-github-runner.sh через gh api.
+  token: "PLACEHOLDER"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-runner
+  namespace: ci
+  labels:
+    app: github-runner
+spec:
+  replicas: 1
+  # Раннер держит регистрацию на себя по имени: две одновременные реплики
+  # с одинаковым RUNNER_NAME конфликтуют, поэтому пересоздаём по одной.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: github-runner
+  template:
+    metadata:
+      labels:
+        app: github-runner
+    spec:
+      # Тот же SA, что использовал Kaniko-пайплайн: права только на Job'ы
+      # и чтение подов/логов в неймспейсе ci (ci/ci-rbac.yaml).
+      serviceAccountName: ci-kaniko
+      containers:
+        - name: runner
+          image: registry.localhost:5111/booking/github-runner:1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUNNER_NAME
+              value: k8s-runner
+            - name: RUNNER_SCOPE
+              value: repo
+            - name: REPO_URL
+              value: https://github.com/lalefrutto/booking-platform
+            - name: RUNNER_LABELS
+              value: "self-hosted,k8s"
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-runner-token
+                  key: token
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              cd /home/runner
+
+              if [ ! -f .runner ]; then
+                echo "[runner] регистрация в ${REPO_URL}"
+                ./config.sh \
+                  --url "${REPO_URL}" \
+                  --token "${RUNNER_TOKEN}" \
+                  --name "${RUNNER_NAME}" \
+                  --labels "${RUNNER_LABELS}" \
+                  --work _work \
+                  --unattended \
+                  --replace
+              else
+                echo "[runner] уже зарегистрирован, пропускаю config.sh"
+              fi
+
+              # Снятие регистрации при штатном завершении пода, чтобы в
+              # настройках репозитория не копились мёртвые offline-раннеры.
+              cleanup() {
+                echo "[runner] снимаю регистрацию"
+                ./config.sh remove --token "${RUNNER_TOKEN}" || true
+              }
+              trap cleanup SIGTERM SIGINT
+
+              ./run.sh & wait $!
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: work
+              mountPath: /home/runner/_work
+      volumes:
+        - name: work
+          emptyDir: {}

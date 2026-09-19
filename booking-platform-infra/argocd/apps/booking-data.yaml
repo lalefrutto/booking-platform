@@ -11,9 +11,9 @@ spec:
   project: default
 
   source:
-    repoURL: http://gitea-http.ci.svc.cluster.local:3000/gitops/booking-platform-infra.git
+    repoURL: git@github.com:lalefrutto/booking-platform.git
     targetRevision: main
-    path: charts/booking-data
+    path: booking-platform-infra/charts/booking-data
     helm:
       valueFiles:
         - values.yaml

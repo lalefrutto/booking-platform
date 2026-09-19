@@ -1,0 +1,134 @@
+# CI/CD пайплайн booking-platform (Блок 2, Часть 5).
+#
+# Перенесён из .gitea/workflows/ci.yaml без изменения структуры: те же
+# триггеры, та же matrix из шести сервисов, те же два job'а. Отличия —
+# только в путях (репозиторий монорепный) и в способе аутентификации:
+# на GitHub есть встроенный GITHUB_TOKEN, поэтому отдельные секреты
+# GITOPS_USER/GITOPS_TOKEN и KUBECONFIG_B64 больше не нужны.
+#
+# Поток: Kaniko собирает образ БЕЗ доступа к docker-сокету -> пушит в
+# in-cluster registry -> пайплайн бампает тег в Helm values -> ArgoCD
+# (automated + selfHeal) сам раскатывает новую версию.
+
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Пути от корня монорепозитория.
+      - 'booking-platform-prototype/services/**'
+      - 'booking-platform-prototype/ci/**'
+      - '.github/workflows/ci.yaml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Тег образа (по умолчанию — 1.0.<номер сборки>)'
+        required: false
+
+env:
+  REGISTRY: registry.localhost:5000
+  IMAGE_PREFIX: booking
+
+jobs:
+  build:
+    # Self-hosted runner живёт подом в том же кластере (ci/github-runner.yaml).
+    runs-on: [self-hosted, k8s]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - user-service
+          - catalog-service
+          - booking-service
+          - payment-service
+          - notification-service
+          - review-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Определить тег образа
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Собираем ${{ matrix.service }}:$TAG"
+
+      # Kaniko запускается как Job в кластере: сборка идёт в userspace,
+      # docker-сокет не пробрасывается, привилегии контейнера не нужны.
+      #
+      # kubectl НЕ настраивается отдельно: раннер — это под, он берёт
+      # in-cluster credentials своего ServiceAccount ci-kaniko (права только
+      # на Job'ы в неймспейсе ci). В варианте с Gitea раннер запускал шаги
+      # в отдельных docker-контейнерах и туда приходилось прокидывать
+      # kubeconfig секретом.
+      - name: Сборка и push через Kaniko
+        env:
+          # Репозиторий приватный — Kaniko клонирует git-контекст по токену
+          # этого запуска (живёт только пока идёт job).
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONTEXT_REPO: https://github.com/${{ github.repository }}.git
+          GIT_CONTEXT_SUBPATH: booking-platform-prototype/services/${{ matrix.service }}
+        run: |
+          chmod +x ./booking-platform-prototype/ci/kaniko-build.sh
+          ./booking-platform-prototype/ci/kaniko-build.sh \
+            "${{ matrix.service }}" "${{ steps.tag.outputs.tag }}"
+
+  bump-and-deploy:
+    runs-on: [self-hosted, k8s]
+    needs: build
+    # Право на запись в репозиторий — чтобы закоммитить новый тег.
+    # Встроенного GITHUB_TOKEN достаточно, personal access token не нужен.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Токен сохраняется в конфиге git, иначе push потребует ручной
+          # настройки credential helper.
+          persist-credentials: true
+
+      - name: Определить тег образа
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Бамп тега образов в Helm values
+        run: |
+          set -e
+          VALUES=booking-platform-infra/charts/booking-platform/values.yaml
+
+          sed -i "s|^  imageTag: .*|  imageTag: \"${{ steps.tag.outputs.tag }}\"|" "$VALUES"
+          echo "--- после правки ---"
+          grep -n 'imageTag' "$VALUES"
+
+          if git diff --quiet -- "$VALUES"; then
+            echo "Тег не изменился, коммитить нечего."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$VALUES"
+          # [skip ci] — вторая страховка от самозапуска: основной фильтр это
+          # paths в триггере (booking-platform-infra/** туда не входит).
+          git commit -m "CI: тег образов ${{ steps.tag.outputs.tag }} (сборка #${{ github.run_number }}) [skip ci]"
+          git push origin HEAD:main
+
+      # Дальше ничего делать не нужно: Application booking-platform в ArgoCD
+      # настроен на automated sync + selfHeal и подхватит коммит сам.
+      - name: Итог
+        run: |
+          echo "Тег ${{ steps.tag.outputs.tag }} закоммичен в main."
+          echo "ArgoCD синхронизирует booking-platform автоматически."
