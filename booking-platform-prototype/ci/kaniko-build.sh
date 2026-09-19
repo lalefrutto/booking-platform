@@ -51,7 +51,16 @@ if [ -n "${GIT_TOKEN}" ]; then
   kubectl -n "${NAMESPACE}" create secret generic "${SECRET}" \
     --from-literal=GIT_TOKEN="${GIT_TOKEN}" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  GIT_ENV="            - name: GIT_TOKEN
+  # GIT_USERNAME + GIT_PASSWORD, а НЕ один GIT_TOKEN.
+  #
+  # С одним GIT_TOKEN Kaniko подставляет его как имя пользователя
+  # (https://<token>@github.com/...). Для личного OAuth-токена gho_ GitHub
+  # это принимает, а для токена GitHub Actions ghs_ — нет, и сборка падает с
+  # "error resolving source context: authentication required".
+  # Для ghs_ нужен ровно логин x-access-token, а токен идёт паролем.
+  GIT_ENV="            - name: GIT_USERNAME
+              value: x-access-token
+            - name: GIT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: ${SECRET}
