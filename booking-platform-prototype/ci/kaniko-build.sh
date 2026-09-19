@@ -67,7 +67,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat <<EOF | kubectl apply -f -
+MANIFEST=$(cat <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -110,6 +110,9 @@ ${GIT_ENV}
             limits:
               memory: 2Gi
 EOF
+)
+
+echo "${MANIFEST}" | kubectl apply -f -
 
 # Опрос вместо `kubectl wait` на два условия: в POSIX sh нет `wait -n`,
 # а ждать только condition=complete нельзя — упавшая сборка висела бы
@@ -130,6 +133,11 @@ if [ "$(kubectl -n "${NAMESPACE}" get "job/${JOB}" -o jsonpath='{.status.succeed
   exit 0
 fi
 
-echo "==> ОШИБКА сборки ${SERVICE}:${TAG}, логи Kaniko:"
-kubectl -n "${NAMESPACE}" logs "job/${JOB}" --tail=50 || true
+echo "==> ОШИБКА сборки ${SERVICE}:${TAG}"
+echo "--- первые строки лога Kaniko (сообщение об ошибке идёт первым) ---"
+kubectl -n "${NAMESPACE}" logs "job/${JOB}" 2>/dev/null | head -25 || true
+echo "--- состояние пода ---"
+kubectl -n "${NAMESPACE}" describe pod -l job-name="${JOB}" 2>/dev/null   | sed -n '/Events:/,$p' | head -15 || true
+echo "--- отправленный манифест Job ---"
+echo "${MANIFEST}"
 exit 1
