@@ -1,9 +1,19 @@
 ---
-# Учётка, под которой CI создаёт Job'ы Kaniko.
+# Отдельный неймспейс под сборки.
 #
-# Прав ровно столько, сколько нужно пайплайну: заводить и удалять Job'ы
-# в неймспейсе ci и читать логи их подов. Ни доступа к секретам приложения,
-# ни прав в неймспейсе booking у CI нет.
+# ПОЧЕМУ НЕ В `ci`: пайплайну нужно создавать Secret с токеном клонирования
+# приватного репозитория. Если выдать права на secrets в том же неймспейсе,
+# где живёт раннер, CI сможет прочитать и github-runner-token — токен
+# регистрации раннера. Разносим: раннер в `ci`, сборки в `ci-builds`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ci-builds
+  labels:
+    app.kubernetes.io/part-of: booking-platform
+    app.kubernetes.io/managed-by: kubectl
+---
+# Учётка, под которой CI создаёт Job'ы Kaniko.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -14,7 +24,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: ci-kaniko
-  namespace: ci
+  namespace: ci-builds
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -22,12 +32,18 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # Нужны для короткоживущего Secret с токеном клонирования приватного
+  # репозитория: Kaniko читает его через secretKeyRef, а скрипт сборки
+  # удаляет сразу после завершения Job'а.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ci-kaniko
-  namespace: ci
+  namespace: ci-builds
 subjects:
   - kind: ServiceAccount
     name: ci-kaniko
@@ -38,8 +54,10 @@ roleRef:
   name: ci-kaniko
 ---
 # Долгоживущий токен: начиная с Kubernetes 1.24 ServiceAccount больше не
-# получает токен автоматически, а CI-раннер живёт вне кластера и не может
-# пользоваться projected-токеном пода.
+# получает токен автоматически. Нужен для варианта, когда раннер работает
+# вне кластера (так было с act_runner: kubeconfig приходил секретом).
+# Текущий self-hosted runner GitHub — под в кластере и пользуется
+# in-cluster credentials, но токен оставлен для воспроизводимости схемы.
 apiVersion: v1
 kind: Secret
 metadata:

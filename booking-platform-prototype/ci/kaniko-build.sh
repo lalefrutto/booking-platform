@@ -19,7 +19,7 @@ set -eu
 SERVICE="$1"
 TAG="$2"
 
-NAMESPACE="${KANIKO_NAMESPACE:-ci}"
+NAMESPACE="${KANIKO_NAMESPACE:-ci-builds}"
 REGISTRY="${REGISTRY:-registry.localhost:5000}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-booking}"
 GIT_REPO="${GIT_CONTEXT_REPO:-https://github.com/lalefrutto/booking-platform.git}"
